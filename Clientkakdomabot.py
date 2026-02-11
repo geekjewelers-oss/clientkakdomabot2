@@ -18,6 +18,7 @@ from aiogram.fsm.state import StatesGroup, State
 from PIL import Image
 import pytesseract
 import cv2
+import numpy as np
 import boto3
 from botocore.client import Config
 from docxtpl import DocxTemplate
@@ -246,7 +247,7 @@ async def passport_received(message: types.Message, state: FSMContext):
         # берем наибольшее фото
         photo_file = message.photo[-1]
         file_id = photo_file.file_id
-    elif message.document and message.document.mime_type.startswith("image"):
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith("image"):
         file_id = message.document.file_id
     else:
         await message.answer("Пожалуйста, отправьте фото паспорта в виде фото или image-файла.")
@@ -367,7 +368,6 @@ async def corrections_handler(message: types.Message, state: FSMContext):
 
 # ----------------- Запуск -----------------
 if __name__ == "__main__":
-    import numpy as np  # импорт здесь, чтобы не мешать при установке зависимостей
     from aiogram import executor
     logger.info("Запускаю бота...")
     executor.start_polling(dp, skip_updates=True)

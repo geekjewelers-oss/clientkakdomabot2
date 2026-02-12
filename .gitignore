@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+downloads/
+*.log
+google_key.json
+.vscode/

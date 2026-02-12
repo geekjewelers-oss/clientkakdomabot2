@@ -1,0 +1,7 @@
+aiogram
+python-dotenv
+pytesseract
+Pillow
+opencv-python
+numpy
+requests

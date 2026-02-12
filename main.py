@@ -22,6 +22,7 @@ from bot.mrz_parser import (
     parse_td3_mrz,
 )
 from bot.ocr_fallback import easyocr_extract_text
+from bot.vision_fallback import yandex_vision_extract_text
 from config import (
     BITRIX_WEBHOOK_URL,
     OPENAI_API_KEY,
@@ -30,6 +31,8 @@ from config import (
     S3_ENDPOINT_URL,
     S3_SECRET_KEY,
     TELEGRAM_TOKEN,
+    YANDEX_VISION_API_KEY,
+    YANDEX_VISION_FOLDER_ID,
 )
 
 # ----------------- Настройка логирования -----------------
@@ -148,13 +151,19 @@ async def passport_received(message: types.Message, state: FSMContext):
     l1, l2 = find_mrz_from_text(text)
     parsed = {}
     if l1 and l2:
+        logger.info("MRZ found")
         parsed = parse_td3_mrz(l1, l2)
         parsed['_mrz_raw'] = (l1, l2)
         parsed['_ocr_text_sample'] = text[:400]
         # сохраняем промежуточно
     else:
-        # не нашлось MRZ — попробуем fallback local OCR (полный распознанный текст)
+        logger.info("MRZ not found — running EasyOCR")
         fallback_text = easyocr_extract_text(img_bytes)
+        if len(fallback_text.strip()) < 20:
+            logger.info("EasyOCR weak — running Vision API")
+            if YANDEX_VISION_API_KEY and YANDEX_VISION_FOLDER_ID:
+                fallback_text = yandex_vision_extract_text(img_bytes) or fallback_text
+
         parsed['_mrz_raw'] = None
         parsed['_ocr_text_sample'] = (fallback_text or text)[:400]
 

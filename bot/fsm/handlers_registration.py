@@ -76,6 +76,17 @@ def _is_valid_phone(phone: str) -> bool:
     return bool(re.fullmatch(r"\+?[0-9()\-\s]{10,20}", phone.strip()))
 
 
+def _quality_retry_reasons(quality: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if quality.get("blur_bad"):
+        reasons.append("Фото размыто")
+    if not quality.get("checksum_ok", False):
+        reasons.append("MRZ не читается")
+    if float(quality.get("exposure_score", 1.0)) < 0.5:
+        reasons.append("Слишком темное/светлое фото")
+    return reasons
+
+
 async def _get_session(state: FSMContext) -> dict[str, Any]:
     data = await state.get_data()
     return data.get("session", _new_session())
@@ -373,20 +384,43 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
     mrz_lines = ocr_result.get("mrz_lines")
     source = ocr_result.get("source") or "unknown"
     confidence = ocr_result.get("confidence") or "low"
+    quality = ocr_result.get("quality") or {}
+    conf = float(quality.get("confidence", 0.0))
+
+    session["passport_quality"] = quality
+    session["passport_confidence"] = conf
+    session["passport_needs_retry"] = bool(quality.get("needs_retry", False))
+    await state.update_data(session=session)
+
+    logger.info(
+        "OCR_QUALITY: blur=%s confidence=%s checksum_ok=%s needs_retry=%s",
+        quality.get("blur_score"),
+        conf,
+        quality.get("checksum_ok", False),
+        quality.get("needs_retry", False),
+    )
 
     logger.info("[OCR] handler stage: source=%s, confidence=%s, text_len=%d", source, confidence, len(text))
-
-    if confidence == "low":
-        parsed["needs_better_photo"] = True
-        await message.answer(
-            "Качество распознавания низкое. Отправьте, пожалуйста, более чёткое фото без бликов и обрезки."
-        )
 
     if not parsed_fields:
         await message.answer(
             "Не удалось распознать паспортные данные. Отправьте более четкое фото этого же паспорта."
         )
         return
+
+    if quality.get("needs_retry"):
+        reasons = _quality_retry_reasons(quality)
+        reasons_text = f"\nПричины: {', '.join(reasons)}." if reasons else ""
+        await message.answer(
+            "Фото плохо читается. Пожалуйста пришлите более четкое фото паспорта "
+            "(без бликов, полностью MRZ зона)."
+            f"{reasons_text}"
+        )
+        return
+
+    auto_confirm_passport = False
+    if conf >= 0.80:
+        auto_confirm_passport = True
 
     passport_entry = {
         "index": passport_index,
@@ -395,8 +429,12 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
         "mrz_lines": mrz_lines,
         "ocr_source": source,
         "ocr_confidence": confidence,
+        "ocr_quality": quality,
         "confirmed": False,
     }
+
+    if auto_confirm_passport:
+        passport_entry["confirmed"] = True
 
     passports = [p for p in session.get("passports", []) if p.get("index") != passport_index]
     passports.append(passport_entry)
@@ -415,13 +453,30 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
         ]
     )
 
-    await _go_to_step(
-        message,
-        state,
-        next_state=Form.confirm_passport_fields,
-        text=f"Паспорт №{passport_index} распознан:\n\n{parsed_text}\n\nВсе верно?",
-        keyboard=retry_passport_kb(),
-        log_step=f"confirm_passport_fields | passport index={passport_index}",
+    if auto_confirm_passport:
+        await _go_to_step(
+            message,
+            state,
+            next_state=Form.ask_add_another_passport,
+            text=f"Паспорт №{passport_index} распознан и автоматически подтвержден.",
+            keyboard=add_another_keyboard(),
+            log_step=f"ask_add_another_passport | passport index={passport_index}",
+        )
+        return
+
+    if conf >= 0.55:
+        await _go_to_step(
+            message,
+            state,
+            next_state=Form.confirm_passport_fields,
+            text=f"Паспорт №{passport_index} распознан:\n\n{parsed_text}\n\nВсе верно?",
+            keyboard=retry_passport_kb(),
+            log_step=f"confirm_passport_fields | passport index={passport_index}",
+        )
+        return
+
+    await message.answer(
+        "Фото плохо читается. Пожалуйста пришлите более четкое фото паспорта (без бликов, полностью MRZ зона)."
     )
 
 

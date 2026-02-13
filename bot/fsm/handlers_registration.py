@@ -408,8 +408,24 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
         )
         return
 
+    auto_confirm_passport = False
+    if conf >= 0.80:
+        auto_confirm_passport = True
+
+    reasons = _quality_retry_reasons(quality) if quality.get("needs_retry") else []
+    logger.info(
+        "OCR_DECISION: passport_index=%s auto_confirm=%s preview_required=%s needs_retry=%s conf=%.2f blur=%.1f exposure=%.2f reasons=%s",
+        passport_index,
+        auto_confirm_passport,
+        conf >= 0.55 and not auto_confirm_passport,
+        quality.get("needs_retry", False),
+        conf,
+        float(quality.get("blur_score") or 0.0),
+        float(quality.get("exposure_score") or 0.0),
+        ";".join(reasons) if reasons else "",
+    )
+
     if quality.get("needs_retry"):
-        reasons = _quality_retry_reasons(quality)
         reasons_text = f"\nПричины: {', '.join(reasons)}." if reasons else ""
         await message.answer(
             "Фото плохо читается. Пожалуйста пришлите более четкое фото паспорта "
@@ -417,10 +433,6 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
             f"{reasons_text}"
         )
         return
-
-    auto_confirm_passport = False
-    if conf >= 0.80:
-        auto_confirm_passport = True
 
     passport_entry = {
         "index": passport_index,

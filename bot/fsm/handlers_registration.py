@@ -32,8 +32,7 @@ from bot.keyboards.registration_kb import (
     manager_keyboard,
     retry_passport_kb,
 )
-from bot.mrz_parser import extract_text_from_image_bytes, find_mrz_from_text, parse_td3_mrz
-from bot.ocr_fallback import easyocr_extract_text
+from bot.ocr_orchestrator import ocr_pipeline_extract
 
 logger = logging.getLogger(__name__)
 router = Router(name="registration")
@@ -367,21 +366,23 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
     await message.bot.download(file, destination=buf)
     img_bytes = buf.getvalue()
 
-    text = extract_text_from_image_bytes(img_bytes)
-    logger.info("OCR result length=%s | passport index=%s", len(text or ""), passport_index)
+    ocr_result = ocr_pipeline_extract(img_bytes)
+    text = ocr_result.get("text") or ""
+    parsed_fields = ocr_result.get("parsed") or {}
+    parsed = dict(parsed_fields)
+    mrz_lines = ocr_result.get("mrz_lines")
+    source = ocr_result.get("source") or "unknown"
+    confidence = ocr_result.get("confidence") or "low"
 
-    line1, line2 = find_mrz_from_text(text)
-    parsed = {}
-    if line1 and line2:
-        parsed = parse_td3_mrz(line1, line2)
-    else:
-        fallback_text = easyocr_extract_text(img_bytes)
-        logger.info("Fallback OCR result length=%s | passport index=%s", len(fallback_text or ""), passport_index)
-        line1, line2 = find_mrz_from_text(fallback_text)
-        if line1 and line2:
-            parsed = parse_td3_mrz(line1, line2)
+    logger.info("[OCR] handler stage: source=%s, confidence=%s, text_len=%d", source, confidence, len(text))
 
-    if not parsed:
+    if confidence == "low":
+        parsed["needs_better_photo"] = True
+        await message.answer(
+            "Качество распознавания низкое. Отправьте, пожалуйста, более чёткое фото без бликов и обрезки."
+        )
+
+    if not parsed_fields:
         await message.answer(
             "Не удалось распознать паспортные данные. Отправьте более четкое фото этого же паспорта."
         )
@@ -391,6 +392,9 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
         "index": passport_index,
         "photo_file_id": photo.file_id,
         "parsed": parsed,
+        "mrz_lines": mrz_lines,
+        "ocr_source": source,
+        "ocr_confidence": confidence,
         "confirmed": False,
     }
 

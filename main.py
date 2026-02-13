@@ -17,11 +17,12 @@ from docxtpl import DocxTemplate
 
 from bot.bitrix_api import bitrix_call, create_lead_and_deal
 from bot.mrz_parser import (
+    extract_mrz_from_image_bytes,
     extract_text_from_image_bytes,
-    find_mrz_from_text,
     parse_td3_mrz,
 )
 from bot.ocr_fallback import easyocr_extract_text
+from bot.vision_fallback import vision_extract_text
 from config import (
     BITRIX_WEBHOOK_URL,
     OPENAI_API_KEY,
@@ -85,7 +86,59 @@ def upload_fileobj_to_s3(fileobj, filename, content_type="application/octet-stre
 
 # ----------------- OCR / MRZ extraction -----------------
 
+def ocr_pipeline_extract(img_bytes) -> dict:
+    line1, line2, mrz_text, _mode = extract_mrz_from_image_bytes(img_bytes)
+    if line1 and line2:
+        parsed = parse_td3_mrz(line1, line2)
+        checksum_ok = parsed.get("_mrz_checksum_ok", False)
+        confidence = "high" if checksum_ok else "medium"
+        source = "mrz"
+        text_value = mrz_text
+        logger.info("[OCR] OCR stage: mrz, text_len=%s", len(text_value or ""))
+        return {
+            "text": text_value or "",
+            "source": source,
+            "confidence": confidence,
+            "parsed": parsed,
+            "mrz_lines": (line1, line2),
+        }
+
+    text = extract_text_from_image_bytes(img_bytes)
+    logger.info("[OCR] OCR stage: tesseract, text_len=%s", len(text or ""))
+
+    easy_text = easyocr_extract_text(img_bytes)
+    logger.info("[OCR] OCR stage: easyocr, text_len=%s", len(easy_text or ""))
+    if easy_text and len(easy_text) > 40:
+        return {
+            "text": easy_text,
+            "source": "easyocr",
+            "confidence": "medium",
+            "parsed": {},
+            "mrz_lines": None,
+        }
+
+    vision_text = vision_extract_text(img_bytes, current_text=easy_text or text, min_len_for_skip=60)
+    logger.info("[OCR] OCR stage: vision, text_len=%s", len(vision_text or ""))
+
+    if vision_text:
+        return {
+            "text": vision_text,
+            "source": "vision",
+            "confidence": "medium",
+            "parsed": {},
+            "mrz_lines": None,
+        }
+
+    return {
+        "text": easy_text or text or "",
+        "source": "tesseract",
+        "confidence": "low",
+        "parsed": {},
+        "mrz_lines": None,
+    }
+
 # ----------------- Bitrix helper (webhook-based) -----------------
+
 # ----------------- Документы: генерация docx по шаблону -----------------
 def generate_contract_docx(template_path, out_path, context: dict):
     doc = DocxTemplate(template_path)
@@ -143,20 +196,16 @@ async def passport_received(message: types.Message, state: FSMContext):
     img_bytes = file_bytes.read()  # bytes
 
     await message.answer("Получил фото. Пытаюсь распознать MRZ и извлечь данные... Пару секунд.")
-    # извлекаем текст (local OCR)
-    text = extract_text_from_image_bytes(img_bytes)
-    l1, l2 = find_mrz_from_text(text)
-    parsed = {}
-    if l1 and l2:
-        parsed = parse_td3_mrz(l1, l2)
-        parsed['_mrz_raw'] = (l1, l2)
-        parsed['_ocr_text_sample'] = text[:400]
-        # сохраняем промежуточно
-    else:
-        # не нашлось MRZ — попробуем fallback local OCR (полный распознанный текст)
-        fallback_text = easyocr_extract_text(img_bytes)
-        parsed['_mrz_raw'] = None
-        parsed['_ocr_text_sample'] = (fallback_text or text)[:400]
+    ocr_result = ocr_pipeline_extract(img_bytes)
+
+    parsed = ocr_result.get("parsed") or {}
+    parsed['_mrz_raw'] = ocr_result.get("mrz_lines")
+    parsed['_ocr_text_sample'] = (ocr_result.get("text") or "")[:400]
+    parsed['_ocr_source'] = ocr_result.get("source")
+    parsed['_ocr_confidence'] = ocr_result.get("confidence")
+
+    if ocr_result.get("confidence") == "low":
+        parsed["needs_better_photo"] = True
 
     # Сохраним временные данные в state
     tmp = {"parsed": parsed}

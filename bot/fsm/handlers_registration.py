@@ -430,6 +430,8 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
         "ocr_source": source,
         "ocr_confidence": confidence,
         "ocr_quality": quality,
+        "ocr_blur": quality.get("blur_score"),
+        "ocr_exposure": quality.get("exposure_score"),
         "confirmed": False,
     }
 

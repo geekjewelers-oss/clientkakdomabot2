@@ -115,6 +115,7 @@ def compute_mrz_checksum(value: str) -> int:
 
 
 def normalize_for_numeric(s: str) -> str:
+    s = s.upper()
     return "".join(NUM_MAP.get(ch, ch) for ch in s)
 
 
@@ -130,7 +131,13 @@ def validate_td3_composite(l2: str) -> bool:
         l2 = l2 + "<" * (44 - len(l2))
 
     composite_check = l2[43]
-    composite_value = f"{l2[0:10]}{l2[13:20]}{l2[21:43]}"
+
+    part_doc = normalize_for_numeric(l2[0:10])     # passport + check
+    part_birth = normalize_for_numeric(l2[13:20])  # birth + check
+    part_exp = normalize_for_numeric(l2[21:28])    # expiry + check
+    optional = l2[28:43]                           # may contain letters → no normalize
+
+    composite_value = part_doc + part_birth + part_exp + optional
     return validate_mrz_checksum(composite_value, composite_check)
 
 
@@ -200,7 +207,11 @@ def parse_td3_mrz(line1: str, line2: str):
                 compute_mrz_checksum(expiry_norm),
             )
         if not checks["composite"]:
-            composite_value = f"{l2[0:10]}{l2[13:20]}{l2[21:43]}"
+            part_doc = normalize_for_numeric(l2[0:10])
+            part_birth = normalize_for_numeric(l2[13:20])
+            part_exp = normalize_for_numeric(l2[21:28])
+            optional = l2[28:43]
+            composite_value = part_doc + part_birth + part_exp + optional
             logger.warning(
                 "[OCR] MRZ checksum failed: field=composite value=%s check_char=%s computed=%s",
                 composite_value,

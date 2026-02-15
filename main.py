@@ -1,116 +1,349 @@
-# main.py
-import os
+# =========================
+# Imports
+# =========================
+import asyncio
+import base64
+import hashlib
+import io
 import logging
-import tempfile
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram import F
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.fsm.state import StatesGroup, State
+import os
+import re
+from pathlib import Path
+from typing import Any
 
 import boto3
+import cv2
+import easyocr
+import numpy as np
+import pytesseract
+import requests
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from botocore.client import Config
-from docxtpl import DocxTemplate
+from dotenv import load_dotenv
+from PIL import Image
 
-from bot.bitrix_api import bitrix_call, create_lead_and_deal
-from bot.mrz_parser import (
-    extract_mrz_from_image_bytes,
-    extract_text_from_image_bytes,
-    parse_td3_mrz,
-)
-from bot.ocr_fallback import easyocr_extract_text
-from bot.vision_fallback import yandex_vision_extract_text
-from config import (
-    BITRIX_WEBHOOK_URL,
-    OPENAI_API_KEY,
-    S3_ACCESS_KEY,
-    S3_BUCKET,
-    S3_ENDPOINT_URL,
-    S3_SECRET_KEY,
-    TELEGRAM_TOKEN,
-    YANDEX_VISION_API_KEY,
-    YANDEX_VISION_FOLDER_ID,
-)
 
-# ----------------- Настройка логирования -----------------
+# =========================
+# Config / env loading
+# =========================
+load_dotenv()
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN", "")
+BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL", "")
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "")
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "")
+S3_BUCKET = os.getenv("S3_BUCKET", "")
+YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY", "")
+YANDEX_VISION_FOLDER_ID = os.getenv("YANDEX_VISION_FOLDER_ID", "")
+
+S3_REGION = os.getenv("S3_REGION", "us-east-1")
+DOWNLOADS_DIR = Path(os.getenv("DOWNLOADS_DIR", "downloads"))
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+OCR_MIN_EASYOCR_LEN = _int_env("OCR_MIN_EASYOCR_LEN", 40)
+OCR_SKIP_VISION_IF_LEN = _int_env("OCR_SKIP_VISION_IF_LEN", 60)
+
+BITRIX_DEAL_FIELDS = {
+    "surname": "UF_CRM_PASSPORT_SURNAME",
+    "given_names": "UF_CRM_PASSPORT_NAME",
+    "passport_number": "UF_CRM_PASSPORT_NUMBER",
+    "nationality": "UF_CRM_PASSPORT_NATION",
+    "birth_date": "UF_CRM_BIRTH_DATE",
+    "expiry_date": "UF_CRM_PASSPORT_EXPIRY",
+}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ----------------- Загрузка env -----------------
 
-if not TELEGRAM_TOKEN:
-    logger.error("TELEGRAM_TOKEN не задан в .env")
-    raise SystemExit("TELEGRAM_TOKEN required")
+# =========================
+# MRZ parsing functions
+# =========================
+MRZ_REGEX = re.compile(r"([A-Z0-9<]{20,})\s*[\n\r]+([A-Z0-9<]{20,})", re.MULTILINE)
+_CHECKSUM_WEIGHTS = (7, 3, 1)
+NUM_MAP = {"O": "0", "Q": "0", "I": "1", "L": "1", "B": "8", "S": "5", "G": "6"}
 
-# ----------------- Создание бота -----------------
-bot = Bot(token=TELEGRAM_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
 
-# ----------------- FSM состояния -----------------
-class Form(StatesGroup):
-    waiting_checklist_confirmation = State()
-    waiting_passport_photo = State()
-    waiting_field_corrections = State()
-    waiting_final_confirmation = State()
+def compute_mrz_hash(line1: str | None, line2: str | None) -> str | None:
+    l1 = (line1 or "").strip()
+    l2 = (line2 or "").strip()
+    if not l1 and not l2:
+        return None
+    value = f"{l1}|{l2}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest().lower()
 
-# ----------------- Утилиты: S3 (Backblaze/DigitalOcean) -----------------
-def get_s3_client():
-    session = boto3.session.Session()
-    s3 = session.client(
-        's3',
-        endpoint_url=S3_ENDPOINT_URL,
-        aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY,
-        config=Config(signature_version='s3v4'),
-        region_name='us-east-1'  # можно поменять
-    )
-    return s3
 
-def upload_fileobj_to_s3(fileobj, filename, content_type="application/octet-stream"):
-    s3 = get_s3_client()
-    s3.upload_fileobj(
-        Fileobj=fileobj,
-        Bucket=S3_BUCKET,
-        Key=filename,
-        ExtraArgs={"ContentType": content_type, "ACL": "private"}
-    )
-    # Генерируем presigned url (по умолчанию expiry 7 дней)
-    presigned = s3.generate_presigned_url(
-        ClientMethod='get_object',
-        Params={"Bucket": S3_BUCKET, "Key": filename},
-        ExpiresIn=60*60*24*7
-    )
-    return presigned
+def image_bytes_to_pil(img_bytes: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(img_bytes))
 
-# ----------------- OCR / MRZ extraction -----------------
 
-def ocr_pipeline_extract(img_bytes) -> dict:
+def preprocess_for_mrz_cv_mode(image: Image.Image, mode: str = "current") -> np.ndarray:
+    """Preprocess image for MRZ OCR using one of supported modes."""
+    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+
+    if mode == "adaptive":
+        return cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            2,
+        )
+
+    if mode == "morphology":
+        _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        return cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel)
+
+    # current threshold mode
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return th
+
+
+def extract_text_from_image_bytes(img_bytes: bytes) -> str:
+    pil = image_bytes_to_pil(img_bytes)
+    return pytesseract.image_to_string(pil, lang="eng")
+
+
+def find_mrz_from_text(text: str) -> tuple[str | None, str | None]:
+    candidates = MRZ_REGEX.findall(text.replace(" ", "").replace("\r", "\n"))
+    if candidates:
+        for l1, l2 in candidates:
+            if len(l1) >= 30 and len(l2) >= 30:
+                return l1.strip(), l2.strip()
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for idx in range(len(lines) - 1):
+        line_a, line_b = lines[idx], lines[idx + 1]
+        if line_a.count("<") >= 3 and line_b.count("<") >= 3 and len(line_a) >= 25 and len(line_b) >= 25:
+            return line_a.replace(" ", ""), line_b.replace(" ", "")
+
+    return None, None
+
+
+def extract_mrz_from_image_bytes(img_bytes: bytes) -> tuple[str | None, str | None, str, str | None]:
+    """Run MRZ extraction on multiple preprocess variants until MRZ lines are found."""
+    pil = image_bytes_to_pil(img_bytes)
+    preprocess_modes = ("current", "adaptive", "morphology")
+
+    for mode in preprocess_modes:
+        try:
+            processed = preprocess_for_mrz_cv_mode(pil, mode=mode)
+            text = pytesseract.image_to_string(processed, lang="eng")
+        except Exception as exc:
+            logger.warning("[OCR] MRZ preprocess failed: mode=%s, error=%s", mode, exc)
+            continue
+
+        line1, line2 = find_mrz_from_text(text)
+        if line1 and line2:
+            logger.info("[OCR] MRZ found with preprocess=%s", mode)
+            return line1, line2, text, mode
+
+    return None, None, "", None
+
+
+def _mrz_char_value(ch: str) -> int:
+    if ch.isdigit():
+        return int(ch)
+    if "A" <= ch <= "Z":
+        return ord(ch) - ord("A") + 10
+    if ch == "<":
+        return 0
+    return 0
+
+
+def compute_mrz_checksum(value: str) -> int:
+    total = 0
+    for idx, ch in enumerate(value):
+        total += _mrz_char_value(ch) * _CHECKSUM_WEIGHTS[idx % 3]
+    return total % 10
+
+
+def normalize_for_numeric(value: str) -> str:
+    value = value.upper()
+    return "".join(NUM_MAP.get(ch, ch) for ch in value)
+
+
+def validate_mrz_checksum(value: str, check_char: str) -> bool:
+    if not check_char or not check_char.isdigit():
+        return False
+    return compute_mrz_checksum(value) == int(check_char)
+
+
+def validate_td3_composite(line2: str) -> bool:
+    if len(line2) < 44:
+        line2 = line2 + "<" * (44 - len(line2))
+
+    composite_check = line2[43]
+    part_doc = normalize_for_numeric(line2[0:10])
+    part_birth = normalize_for_numeric(line2[13:20])
+    part_exp = normalize_for_numeric(line2[21:28])
+    optional = line2[28:43]
+
+    composite_value = part_doc + part_birth + part_exp + optional
+    return validate_mrz_checksum(composite_value, composite_check)
+
+
+def parse_td3_mrz(line1: str, line2: str) -> dict[str, Any]:
+    """Parse TD3 passport MRZ (2 lines, 44 chars each normally)."""
+    l1 = line1 + "<" * (44 - len(line1)) if len(line1) < 44 else line1
+    l2 = line2 + "<" * (44 - len(line2)) if len(line2) < 44 else line2
+
+    data: dict[str, Any] = {}
+    checks: dict[str, bool] = {}
+
+    try:
+        data["document_type"] = l1[0]
+        data["issuing_country"] = l1[2:5]
+        names = l1[5:44].split("<<")
+        data["surname"] = names[0].replace("<", " ").strip()
+        data["given_names"] = names[1].replace("<", " ").strip() if len(names) > 1 else ""
+
+        passport_number_raw = l2[0:9]
+        passport_check = l2[9]
+        birth_date_raw = l2[13:19]
+        birth_check = l2[19]
+        expiry_raw = l2[21:27]
+        expiry_check = l2[27]
+
+        passport_number_norm = normalize_for_numeric(passport_number_raw)
+        birth_date_norm = normalize_for_numeric(birth_date_raw)
+        expiry_norm = normalize_for_numeric(expiry_raw)
+
+        data["passport_number"] = passport_number_raw.replace("<", "").strip()
+        data["passport_number_check"] = passport_check
+        data["nationality"] = l2[10:13].replace("<", "").strip()
+        data["birth_date"] = f"{birth_date_raw[0:2]}{birth_date_raw[2:4]}{birth_date_raw[4:6]}"
+        data["sex"] = l2[20]
+        data["expiry_date"] = f"{expiry_raw[0:2]}{expiry_raw[2:4]}{expiry_raw[4:6]}"
+
+        checks["passport_number"] = validate_mrz_checksum(passport_number_norm, passport_check)
+        checks["birth_date"] = validate_mrz_checksum(birth_date_norm, birth_check)
+        checks["expiry_date"] = validate_mrz_checksum(expiry_norm, expiry_check)
+        checks["composite"] = validate_td3_composite(l2)
+    except Exception:
+        logger.exception("[OCR] Error parsing MRZ")
+        checks = {"passport_number": False, "birth_date": False, "expiry_date": False, "composite": False}
+
+    check_weights = {
+        "passport_number": 0.2,
+        "birth_date": 0.2,
+        "expiry_date": 0.2,
+        "composite": 0.4,
+    }
+    mrz_confidence_score = sum(weight for key, weight in check_weights.items() if checks.get(key))
+    data["_mrz_checksum_ok"] = all(checks.get(key, False) for key in check_weights)
+    data["mrz_confidence_score"] = float(mrz_confidence_score)
+    return data
+
+
+# =========================
+# OCR functions
+# =========================
+_reader: easyocr.Reader | None = None
+YANDEX_VISION_ENDPOINT = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+
+
+def _get_easyocr_reader() -> easyocr.Reader:
+    global _reader
+    if _reader is None:
+        _reader = easyocr.Reader(["en"])
+    return _reader
+
+
+def easyocr_extract_text(image_bytes: bytes) -> str:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_np = np.array(image)
+
+    reader = _get_easyocr_reader()
+    result = reader.readtext(image_np)
+    texts = [item[1] for item in result if len(item) > 1 and item[1]]
+    joined_text = " ".join(texts).strip()
+
+    logger.info("[OCR] EasyOCR boxes=%s text_len=%s", len(result), len(joined_text))
+    return joined_text
+
+
+def yandex_vision_extract_text(image_bytes: bytes) -> str:
+    if not YANDEX_VISION_API_KEY or not YANDEX_VISION_FOLDER_ID:
+        logger.info("[OCR] Yandex Vision credentials are not configured")
+        return ""
+
+    content = base64.b64encode(image_bytes).decode("utf-8")
+    payload = {
+        "folderId": YANDEX_VISION_FOLDER_ID,
+        "analyze_specs": [
+            {
+                "content": content,
+                "features": [{"type": "TEXT_DETECTION", "text_detection_config": {"languageCodes": ["en"]}}],
+            }
+        ],
+    }
+    headers = {"Authorization": f"Api-Key {YANDEX_VISION_API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        response = requests.post(YANDEX_VISION_ENDPOINT, json=payload, headers=headers, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException:
+        logger.exception("[OCR] Yandex Vision request failed")
+        return ""
+
+    words: list[str] = []
+    for analyzed in response.json().get("results", []):
+        for result in analyzed.get("results", []):
+            text_detection = result.get("textDetection", {})
+            for page in text_detection.get("pages", []):
+                for block in page.get("blocks", []):
+                    for line in block.get("lines", []):
+                        for word in line.get("words", []):
+                            text = word.get("text")
+                            if text:
+                                words.append(text)
+
+    extracted_text = " ".join(words).strip()
+    logger.info("[OCR] Yandex Vision text_len=%s", len(extracted_text))
+    return extracted_text
+
+
+def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
     line1, line2, mrz_text, _mode = extract_mrz_from_image_bytes(img_bytes)
     if line1 and line2:
         parsed = parse_td3_mrz(line1, line2)
         checksum_ok = parsed.get("_mrz_checksum_ok", False)
         confidence = "high" if checksum_ok else "medium"
-        source = "mrz"
-        text_value = mrz_text
-        logger.info("[OCR] OCR stage: mrz, text_len=%s", len(text_value or ""))
         return {
-            "text": text_value or "",
-            "source": source,
+            "text": mrz_text or "",
+            "source": "mrz",
             "confidence": confidence,
             "parsed": parsed,
             "mrz_lines": (line1, line2),
         }
 
     text = extract_text_from_image_bytes(img_bytes)
-    logger.info("[OCR] OCR stage: tesseract, text_len=%s", len(text or ""))
+    logger.info("[OCR] Tesseract text_len=%s", len(text or ""))
 
     easy_text = easyocr_extract_text(img_bytes)
-    logger.info("[OCR] OCR stage: easyocr, text_len=%s", len(easy_text or ""))
-    if easy_text and len(easy_text) > 40:
+    if easy_text and len(easy_text) > OCR_MIN_EASYOCR_LEN:
         return {
             "text": easy_text,
             "source": "easyocr",
@@ -119,8 +352,9 @@ def ocr_pipeline_extract(img_bytes) -> dict:
             "mrz_lines": None,
         }
 
-    vision_text = vision_extract_text(img_bytes, current_text=easy_text or text, min_len_for_skip=60)
-    logger.info("[OCR] OCR stage: vision, text_len=%s", len(vision_text or ""))
+    vision_text = ""
+    if len((easy_text or text).strip()) < OCR_SKIP_VISION_IF_LEN:
+        vision_text = yandex_vision_extract_text(img_bytes)
 
     if vision_text:
         return {
@@ -139,181 +373,288 @@ def ocr_pipeline_extract(img_bytes) -> dict:
         "mrz_lines": None,
     }
 
-# ----------------- Bitrix helper (webhook-based) -----------------
 
-# ----------------- Документы: генерация docx по шаблону -----------------
-def generate_contract_docx(template_path, out_path, context: dict):
-    doc = DocxTemplate(template_path)
-    doc.render(context)
-    doc.save(out_path)
-    return out_path
+# =========================
+# S3 upload functions
+# =========================
+def get_s3_client():
+    if not (S3_ENDPOINT_URL and S3_ACCESS_KEY and S3_SECRET_KEY and S3_BUCKET):
+        return None
 
-# ----------------- Telegram handlers -----------------
-
-# клавиатура подтверждения
-def yes_no_keyboard():
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="Да, у меня есть все документы")],
-        [KeyboardButton(text="Нет, хочу отправить позже")]
-    ], resize_keyboard=True)
-    return kb
-
-@dp.message(Command(commands=["start"]))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "Привет! Я помогу загрузить документы для заселения.\n"
-        "Сначала проверим, есть ли у вас все необходимые документы.",
-        reply_markup=yes_no_keyboard()
+    session = boto3.session.Session()
+    return session.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT_URL,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name=S3_REGION,
     )
-    await state.set_state(Form.waiting_checklist_confirmation)
 
-@dp.message(Form.waiting_checklist_confirmation, F.text == "Да, у меня есть все документы")
-async def got_checklist_yes(message: types.Message, state: FSMContext):
-    await message.answer("Отлично. Пришлите, пожалуйста, фотографию паспорта (главная страница или MRZ).", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(Form.waiting_passport_photo)
 
-@dp.message(Form.waiting_checklist_confirmation, F.text == "Нет, хочу отправить позже")
-async def got_checklist_no(message: types.Message, state: FSMContext):
-    await message.answer("Хорошо. Напишите /start когда будете готовы.", reply_markup=ReplyKeyboardRemove())
-    await state.clear()
+def upload_bytes_to_s3(data: bytes, key: str, content_type: str = "application/octet-stream") -> str | None:
+    s3 = get_s3_client()
+    if s3 is None:
+        logger.warning("[S3] S3 credentials are not configured")
+        return None
 
-@dp.message(Form.waiting_passport_photo, content_types=types.ContentType.ANY)
-async def passport_received(message: types.Message, state: FSMContext):
-    # Проверяем есть ли фото / документ
-    photo_file = None
-    if message.photo:
-        # берем наибольшее фото
-        photo_file = message.photo[-1]
-        file_id = photo_file.file_id
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith("image"):
-        file_id = message.document.file_id
-    else:
-        await message.answer("Пожалуйста, отправьте фото паспорта в виде фото или image-файла.")
-        return
+    fileobj = io.BytesIO(data)
+    s3.upload_fileobj(
+        Fileobj=fileobj,
+        Bucket=S3_BUCKET,
+        Key=key,
+        ExtraArgs={"ContentType": content_type, "ACL": "private"},
+    )
 
-    # скачиваем файл
-    file = await bot.get_file(file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    img_bytes = file_bytes.read()  # bytes
+    return s3.generate_presigned_url(
+        ClientMethod="get_object",
+        Params={"Bucket": S3_BUCKET, "Key": key},
+        ExpiresIn=60 * 60 * 24 * 7,
+    )
 
-    await message.answer("Получил фото. Пытаюсь распознать MRZ и извлечь данные... Пару секунд.")
-    # извлекаем текст (local OCR)
-    text = extract_text_from_image_bytes(img_bytes)
-    l1, l2 = find_mrz_from_text(text)
-    parsed = {}
-    if l1 and l2:
-        logger.info("MRZ found")
-        parsed = parse_td3_mrz(l1, l2)
-        parsed['_mrz_raw'] = (l1, l2)
-        parsed['_ocr_text_sample'] = text[:400]
-        # сохраняем промежуточно
-    else:
-        logger.info("MRZ not found — running EasyOCR")
-        fallback_text = easyocr_extract_text(img_bytes)
-        if len(fallback_text.strip()) < 20:
-            logger.info("EasyOCR weak — running Vision API")
-            if YANDEX_VISION_API_KEY and YANDEX_VISION_FOLDER_ID:
-                fallback_text = yandex_vision_extract_text(img_bytes) or fallback_text
 
-        parsed['_mrz_raw'] = None
-        parsed['_ocr_text_sample'] = (fallback_text or text)[:400]
+# =========================
+# Bitrix API functions
+# =========================
+def bitrix_call(method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    if not BITRIX_WEBHOOK_URL:
+        logger.warning("[Bitrix] BITRIX_WEBHOOK_URL is not configured")
+        return None
 
-    # Сохраним временные данные в state
-    tmp = {"parsed": parsed}
-    await state.update_data(tmp)
+    url = BITRIX_WEBHOOK_URL.rstrip("/") + f"/{method}.json"
+    try:
+        response = requests.post(url, json=params, timeout=15)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        logger.exception("[Bitrix] Request failed: method=%s", method)
+        return None
 
-    # Формируем сообщение для подтверждения (выводим ключевые поля)
-    def format_parsed(p):
-        lines = []
-        lines.append(f"Фамилия: {p.get('surname','(не найдено)')}")
-        lines.append(f"Имя: {p.get('given_names','(не найдено)')}")
-        lines.append(f"Номер паспорта: {p.get('passport_number','(не найдено)')}")
-        lines.append(f"Гражданство: {p.get('nationality','(не найдено)')}")
-        lines.append(f"Дата рождения (YYMMDD): {p.get('birth_date','(не найдено)')}")
-        lines.append(f"Срок действия (YYMMDD): {p.get('expiry_date','(не найдено)')}")
-        return "\n".join(lines)
 
-    msg = "Вот что я нашёл:\n\n" + format_parsed(parsed) + "\n\nЕсли что-то неверно — пришлите исправления в формате `поле: значение` (например `Номер паспорта: AB12345`), или нажмите кнопку 'Всё верно'."
-    # клавиатура "Всё верно"
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Всё верно")]], resize_keyboard=True)
-    await message.answer(msg, reply_markup=kb)
-    await state.set_state(Form.waiting_field_corrections)
+def create_lead_and_deal(client_data: dict[str, Any]) -> tuple[Any, Any]:
+    lead_fields = {
+        "TITLE": f"Лид: {client_data.get('surname', '')} {client_data.get('given_names', '')}",
+        "NAME": client_data.get("given_names", ""),
+        "LAST_NAME": client_data.get("surname", ""),
+        "PHONE": [{"VALUE": client_data.get("phone", ""), "VALUE_TYPE": "WORK"}],
+        "COMMENTS": "Авто-лид из Telegram-бота",
+    }
 
-@dp.message(Form.waiting_field_corrections)
-async def corrections_handler(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    data = await state.get_data()
-    parsed = data.get('parsed', {})
+    lead_resp = bitrix_call("crm.lead.add", {"fields": lead_fields})
+    lead_id = lead_resp.get("result") if lead_resp else None
 
-    if text == "Всё верно":
-        # идём дальше: запишем лид / сделку в Bitrix
-        await message.answer("Отлично — сохраняю данные и создаю лид в CRM...", reply_markup=ReplyKeyboardRemove())
-        # собираем client_data
-        client_data = {
-            "surname": parsed.get('surname'),
-            "given_names": parsed.get('given_names'),
-            "passport_number": parsed.get('passport_number'),
-            "nationality": parsed.get('nationality'),
-            "birth_date": parsed.get('birth_date'),
-            # phone/address можно спросить дополнительно
-        }
-        # Создаём лид и сделку
-        lead_id, deal_id = create_lead_and_deal(client_data)
-        await message.answer(f"Лид создан: {lead_id}, Сделка: {deal_id}\nДалее сгенерирую договор и загружу файлы.")
-        # Генерируем договор (пример: template.docx должен быть в папке)
-        template_path = "contract_template.docx"
-        tmp_docx = f"contract_{lead_id}.docx"
-        # если нет шаблона, создаём простой документ в runtime
-        context = {
-            "surname": client_data.get('surname',''),
-            "given_names": client_data.get('given_names',''),
-            "passport_number": client_data.get('passport_number',''),
-            "address": client_data.get('address',''),
-        }
-        try:
-            if os.path.exists(template_path):
-                generate_contract_docx(template_path, tmp_docx, context)
-                # загрузка в S3
-                with open(tmp_docx, "rb") as f:
-                    presigned = upload_fileobj_to_s3(f, f"contracts/{tmp_docx}", content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                # добавляем в комментарий сделки/лида
-                if deal_id:
-                    bitrix_call("crm.activity.add", {"fields": {"OWNER_ID": deal_id, "OWNER_TYPE_ID": 2, "SUBJECT": "Договор", "DESCRIPTION": presigned}})
-                await message.answer("Договор сгенерирован и загружен. Ссылка доступна в CRM.")
-            else:
-                await message.answer("Шаблон договора не найден (contract_template.docx). Пропускаю генерацию.")
-        except Exception as e:
-            logger.exception("Error generating/uploading contract: %s", e)
-            await message.answer("Ошибка при генерации/загрузке договора. Смотри логи на сервере.")
+    deal_fields = {
+        "TITLE": f"Сделка аренда: {client_data.get('surname', '')}",
+        "CATEGORY_ID": 0,
+        "OPPORTUNITY": client_data.get("amount", ""),
+        "CURRENCY_ID": "RUB",
+        "LEAD_ID": lead_id,
+    }
+
+    for client_key, bitrix_field in BITRIX_DEAL_FIELDS.items():
+        value = client_data.get(client_key)
+        if value:
+            deal_fields[bitrix_field] = value
+
+    deal_resp = bitrix_call("crm.deal.add", {"fields": deal_fields})
+    deal_id = deal_resp.get("result") if deal_resp else None
+
+    if lead_id is None:
+        logger.error("[Bitrix] Failed creating lead")
+    if deal_id is None:
+        logger.error("[Bitrix] Failed creating deal")
+
+    return lead_id, deal_id
+
+
+# =========================
+# Telegram bot handler functions
+# =========================
+class Form(StatesGroup):
+    waiting_checklist_confirmation = State()
+    waiting_passport_photo = State()
+    waiting_field_corrections = State()
+
+
+def yes_no_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Да, у меня есть все документы")],
+            [KeyboardButton(text="Нет, хочу отправить позже")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def all_correct_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Всё верно")]],
+        resize_keyboard=True,
+    )
+
+
+def format_parsed(parsed: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"Фамилия: {parsed.get('surname', '(не найдено)')}",
+            f"Имя: {parsed.get('given_names', '(не найдено)')}",
+            f"Номер паспорта: {parsed.get('passport_number', '(не найдено)')}",
+            f"Гражданство: {parsed.get('nationality', '(не найдено)')}",
+            f"Дата рождения (YYMMDD): {parsed.get('birth_date', '(не найдено)')}",
+            f"Срок действия (YYMMDD): {parsed.get('expiry_date', '(не найдено)')}",
+        ]
+    )
+
+
+def register_handlers(dp: Dispatcher, bot: Bot) -> None:
+    @dp.message(Command("start"))
+    async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
-        return
+        await message.answer(
+            "Привет! Я помогу загрузить документы для заселения.\n"
+            "Сначала проверим, есть ли у вас все необходимые документы.",
+            reply_markup=yes_no_keyboard(),
+        )
+        await state.set_state(Form.waiting_checklist_confirmation)
 
-    # Обработка корректировок в формате "Поле: значение"
-    if ":" in text:
-        key, val = text.split(":", 1)
-        key = key.strip().lower()
-        val = val.strip()
-        field_map = {
-            "фамилия": "surname",
-            "имя": "given_names",
-            "номер паспорта": "passport_number",
-            "паспорт": "passport_number",
-            "гражданство": "nationality",
-            "дата рождения": "birth_date",
-            "срок действия": "expiry_date"
-        }
-        if key in field_map:
-            parsed[field_map[key]] = val
-            await state.update_data({"parsed": parsed})
-            await message.answer(f"Поле `{key}` обновлено на `{val}`. Если всё готово — нажмите 'Всё верно' или введите другие исправления.")
-        else:
-            await message.answer("Не распознал поле для правки. Попробуй: 'Фамилия: Иванов' или 'Номер паспорта: AB1234567'.")
-    else:
-        await message.answer("Не понял. Для подтверждения нажмите 'Всё верно' или пришлите исправление в формате `Поле: значение`.")
+    @dp.message(Form.waiting_checklist_confirmation, F.text == "Да, у меня есть все документы")
+    async def got_checklist_yes(message: Message, state: FSMContext) -> None:
+        await message.answer(
+            "Отлично. Пришлите, пожалуйста, фотографию паспорта (главная страница или MRZ).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await state.set_state(Form.waiting_passport_photo)
 
-# ----------------- Запуск -----------------
+    @dp.message(Form.waiting_checklist_confirmation, F.text == "Нет, хочу отправить позже")
+    async def got_checklist_no(message: Message, state: FSMContext) -> None:
+        await message.answer("Хорошо. Напишите /start когда будете готовы.", reply_markup=ReplyKeyboardRemove())
+        await state.clear()
+
+    @dp.message(Form.waiting_passport_photo)
+    async def passport_received(message: Message, state: FSMContext) -> None:
+        file_id = None
+        content_type = "image/jpeg"
+
+        if message.photo:
+            file_id = message.photo[-1].file_id
+        elif message.document and message.document.mime_type and message.document.mime_type.startswith("image"):
+            file_id = message.document.file_id
+            content_type = message.document.mime_type
+
+        if not file_id:
+            await message.answer("Пожалуйста, отправьте фото паспорта в виде фото или image-файла.")
+            return
+
+        file_info = await bot.get_file(file_id)
+        image_stream = await bot.download_file(file_info.file_path)
+        image_bytes = image_stream.read()
+
+        await message.answer("Получил фото. Пытаюсь распознать данные... Пару секунд.")
+        ocr_result = ocr_pipeline_extract(image_bytes)
+        parsed = ocr_result.get("parsed") or {}
+        if not parsed:
+            line1, line2 = find_mrz_from_text(ocr_result.get("text", ""))
+            if line1 and line2:
+                parsed = parse_td3_mrz(line1, line2)
+
+        await state.update_data({"parsed": parsed, "passport_bytes": image_bytes, "passport_content_type": content_type})
+
+        msg = (
+            "Вот что я нашёл:\n\n"
+            + format_parsed(parsed)
+            + "\n\nЕсли что-то неверно — пришлите исправления в формате `поле: значение` "
+            + "(например `Номер паспорта: AB12345`), или нажмите кнопку 'Всё верно'."
+        )
+        await message.answer(msg, reply_markup=all_correct_keyboard(), parse_mode="Markdown")
+        await state.set_state(Form.waiting_field_corrections)
+
+    @dp.message(Form.waiting_field_corrections)
+    async def corrections_handler(message: Message, state: FSMContext) -> None:
+        text = (message.text or "").strip()
+        data = await state.get_data()
+        parsed = data.get("parsed", {})
+
+        if text == "Всё верно":
+            await message.answer("Отлично — сохраняю данные и создаю лид в CRM...", reply_markup=ReplyKeyboardRemove())
+
+            client_data = {
+                "surname": parsed.get("surname"),
+                "given_names": parsed.get("given_names"),
+                "passport_number": parsed.get("passport_number"),
+                "nationality": parsed.get("nationality"),
+                "birth_date": parsed.get("birth_date"),
+                "expiry_date": parsed.get("expiry_date"),
+            }
+            lead_id, deal_id = create_lead_and_deal(client_data)
+
+            passport_bytes = data.get("passport_bytes", b"")
+            if passport_bytes:
+                s3_key = f"passports/{message.from_user.id}_{message.message_id}.jpg"
+                try:
+                    file_url = upload_bytes_to_s3(passport_bytes, key=s3_key, content_type=data.get("passport_content_type", "image/jpeg"))
+                    if file_url and deal_id:
+                        bitrix_call(
+                            "crm.activity.add",
+                            {
+                                "fields": {
+                                    "OWNER_ID": deal_id,
+                                    "OWNER_TYPE_ID": 2,
+                                    "SUBJECT": "Фото паспорта",
+                                    "DESCRIPTION": file_url,
+                                }
+                            },
+                        )
+                except Exception:
+                    logger.exception("[S3] Failed to upload passport image")
+
+            await message.answer(f"Лид создан: {lead_id}, Сделка: {deal_id}")
+            await state.clear()
+            return
+
+        if ":" in text:
+            key, val = text.split(":", 1)
+            key = key.strip().lower()
+            val = val.strip()
+            field_map = {
+                "фамилия": "surname",
+                "имя": "given_names",
+                "номер паспорта": "passport_number",
+                "паспорт": "passport_number",
+                "гражданство": "nationality",
+                "дата рождения": "birth_date",
+                "срок действия": "expiry_date",
+            }
+            if key in field_map:
+                parsed[field_map[key]] = val
+                await state.update_data({"parsed": parsed})
+                await message.answer(
+                    f"Поле `{key}` обновлено на `{val}`. Если всё готово — нажмите 'Всё верно'.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await message.answer("Не распознал поле для правки. Пример: `Фамилия: Иванов`", parse_mode="Markdown")
+            return
+
+        await message.answer(
+            "Не понял. Для подтверждения нажмите 'Всё верно' или пришлите исправление в формате `Поле: значение`.",
+            parse_mode="Markdown",
+        )
+
+
+# =========================
+# Main polling loop
+# =========================
+async def run_bot() -> None:
+    if not TELEGRAM_TOKEN:
+        raise SystemExit("TELEGRAM_TOKEN (or BOT_TOKEN) required")
+
+    bot = Bot(token=TELEGRAM_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    register_handlers(dp, bot)
+
+    logger.info("Запускаю Telegram-бота...")
+    await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
-    from aiogram import executor
-    logger.info("Запускаю бота...")
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(run_bot())

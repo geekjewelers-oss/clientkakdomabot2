@@ -7,10 +7,11 @@ import cv2
 import numpy as np
 
 import config
-from bot.mrz_parser import extract_mrz_from_image_bytes, extract_text_from_image_bytes, parse_td3_mrz
+from bot import metrics
+from bot.mrz_parser import compute_mrz_hash, extract_mrz_from_image_bytes, extract_text_from_image_bytes, parse_td3_mrz
 from bot.ocr_fallback import easyocr_extract_text
 from bot.ocr_quality import blur_score, build_ocr_quality_report, exposure_score
-from bot.vision_fallback import vision_extract_text
+from bot.vision_fallback import yandex_vision_extract_text
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,9 @@ def _local_ocr_attempt(img_bytes: bytes, gray: np.ndarray | None) -> dict[str, A
 
 
 def _fallback_ocr_attempt(img_bytes: bytes, current_text: str) -> str:
-    return vision_extract_text(
-        img_bytes,
-        current_text=current_text,
-        min_len_for_skip=60,
-    )
+    if len((current_text or "").strip()) >= 60:
+        return current_text
+    return yandex_vision_extract_text(img_bytes)
 
 
 def _run_fallback_with_timeout(img_bytes: bytes, current_text: str) -> tuple[str, bool]:
@@ -118,8 +117,11 @@ def _soft_fail_response(
     started_at: float,
     timeout_flag: bool,
     used_fallback_provider: str | None,
+    correlation_id: str | None,
 ) -> dict[str, Any]:
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    sla_threshold_ms = int(config.OCR_SLA_TOTAL_TIMEOUT_SECONDS * 1000 * config.OCR_SLA_BREACH_THRESHOLD_RATIO)
+    sla_breach = elapsed_ms >= sla_threshold_ms
     quality = build_ocr_quality_report({}, blur=0.0, exposure=0.0)
     retry_reason_flags = _build_retry_reason_flags(
         quality=quality,
@@ -127,6 +129,16 @@ def _soft_fail_response(
         timeout_flag=timeout_flag,
         fallback_used=bool(used_fallback_provider),
     )
+
+    metrics_inc: list[str] = ["ocr.sla.soft_fail"]
+    metrics.inc("ocr.sla.soft_fail")
+    if used_fallback_provider:
+        metrics.inc("ocr.sla.fallback_used")
+        metrics_inc.append("ocr.sla.fallback_used")
+    if sla_breach:
+        metrics.inc("ocr.sla.breach")
+        metrics_inc.append("ocr.sla.breach")
+
     return {
         "text": "",
         "source": "sla_soft_fail",
@@ -141,10 +153,16 @@ def _soft_fail_response(
         "used_fallback_provider": used_fallback_provider,
         "timeout_flag": timeout_flag,
         "retry_reason_flags": retry_reason_flags,
+        "sla_breach": sla_breach,
+        "correlation_id": correlation_id,
+        "passport_hash": None,
+        "passport_mrz_len": 0,
+        "metrics_inc": metrics_inc,
+        "logger_version": "ocr_sla_v1",
     }
 
 
-def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
+def ocr_pipeline_extract(img_bytes: bytes, correlation_id: str | None = None) -> dict[str, Any]:
     started_at = time.monotonic()
     gray = _decode_gray_image(img_bytes)
     local_attempts = 0
@@ -164,6 +182,7 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
                 started_at=started_at,
                 timeout_flag=timeout_flag,
                 used_fallback_provider=used_fallback_provider,
+                correlation_id=correlation_id,
             )
 
         result = _local_ocr_attempt(img_bytes, gray)
@@ -197,6 +216,7 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
                     started_at=started_at,
                     timeout_flag=timeout_flag,
                     used_fallback_provider=used_fallback_provider,
+                    correlation_id=correlation_id,
                 )
 
             fallback_text, fallback_timeout = _run_fallback_with_timeout(img_bytes, current_text)
@@ -216,6 +236,9 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
     if elapsed_ms > config.OCR_SLA_TOTAL_TIMEOUT_SECONDS * 1000:
         timeout_flag = True
 
+    sla_threshold_ms = int(config.OCR_SLA_TOTAL_TIMEOUT_SECONDS * 1000 * config.OCR_SLA_BREACH_THRESHOLD_RATIO)
+    sla_breach = elapsed_ms >= sla_threshold_ms
+
     if timeout_flag:
         return _soft_fail_response(
             local_count=local_attempts,
@@ -223,6 +246,7 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
             started_at=started_at,
             timeout_flag=timeout_flag,
             used_fallback_provider=used_fallback_provider,
+            correlation_id=correlation_id,
         )
 
     if not last_result:
@@ -232,6 +256,7 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
             started_at=started_at,
             timeout_flag=timeout_flag,
             used_fallback_provider=used_fallback_provider,
+            correlation_id=correlation_id,
         )
 
     quality = last_result.get("quality") or {}
@@ -247,12 +272,33 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
     else:
         decision_branch = "soft_fail"
 
+    metrics_inc: list[str] = []
+    if used_fallback_provider:
+        metrics.inc("ocr.sla.fallback_used")
+        metrics_inc.append("ocr.sla.fallback_used")
+    if sla_breach:
+        metrics.inc("ocr.sla.breach")
+        metrics_inc.append("ocr.sla.breach")
+
     retry_reason_flags = _build_retry_reason_flags(
         quality=quality,
         confidence=confidence_value,
         timeout_flag=timeout_flag,
         fallback_used=bool(used_fallback_provider),
     )
+
+    if decision_branch == "auto_accept":
+        metrics.inc("ocr.sla.auto_accept")
+        metrics_inc.append("ocr.sla.auto_accept")
+    elif decision_branch == "soft_fail":
+        metrics.inc("ocr.sla.soft_fail")
+        metrics_inc.append("ocr.sla.soft_fail")
+
+    mrz_lines = last_result.get("mrz_lines")
+    line1 = mrz_lines[0] if mrz_lines else None
+    line2 = mrz_lines[1] if mrz_lines else None
+    passport_hash = compute_mrz_hash(line1, line2)
+    passport_mrz_len = len((line1 or "").strip() + (line2 or "").strip())
 
     last_result.update({
         "attempt_local_count": local_attempts,
@@ -262,5 +308,11 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
         "used_fallback_provider": used_fallback_provider,
         "timeout_flag": timeout_flag,
         "retry_reason_flags": retry_reason_flags,
+        "sla_breach": sla_breach,
+        "correlation_id": correlation_id,
+        "passport_hash": passport_hash,
+        "passport_mrz_len": passport_mrz_len,
+        "metrics_inc": metrics_inc,
+        "logger_version": "ocr_sla_v1",
     })
     return last_result

@@ -1,8 +1,10 @@
 import io
+import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from aiogram import F, Router
 
@@ -11,6 +13,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
+from bot import metrics
 from bot.fsm.states import Form
 from bot.keyboards.registration_kb import (
     ADD_ANOTHER_NO_TEXT,
@@ -413,7 +416,13 @@ async def _process_passport_photo_common(message: Message, state: FSMContext, *,
     await message.bot.download(file, destination=buf)
     img_bytes = buf.getvalue()
 
-    ocr_result = ocr_pipeline_extract(img_bytes)
+    correlation_id = session.get("correlation_id")
+    if not correlation_id:
+        correlation_id = str(uuid4())
+        session["correlation_id"] = correlation_id
+        await state.update_data(session=session)
+
+    ocr_result = ocr_pipeline_extract(img_bytes, correlation_id=correlation_id)
     text = ocr_result.get("text") or ""
     parsed_fields = ocr_result.get("parsed") or {}
     parsed = dict(parsed_fields)
@@ -430,6 +439,11 @@ async def _process_passport_photo_common(message: Message, state: FSMContext, *,
     fallback_attempts = int(ocr_result.get("attempt_fallback_count", 0))
     total_elapsed_ms = int(ocr_result.get("total_elapsed_ms", 0))
     used_fallback_provider = ocr_result.get("used_fallback_provider")
+    sla_breach = bool(ocr_result.get("sla_breach", False))
+    passport_hash = ocr_result.get("passport_hash")
+    passport_mrz_len = int(ocr_result.get("passport_mrz_len", 0))
+    metrics_inc = list(ocr_result.get("metrics_inc") or [])
+    logger_version = ocr_result.get("logger_version") or "ocr_sla_v1"
 
     session["passport_quality"] = quality
     session["passport_confidence"] = conf
@@ -459,17 +473,40 @@ async def _process_passport_photo_common(message: Message, state: FSMContext, *,
 
     logger.info("[OCR] handler stage: source=%s, confidence=%s, text_len=%d", source, confidence, len(text))
 
-    logger.info(
-        "OCR_SLA_DECISION passport_index=%s local_attempts=%s fallback_attempts=%s total_time=%s decision=%s confidence=%.2f used_fallback=%s manual_mode_triggered=%s",
-        passport_index,
-        local_attempts,
-        fallback_attempts,
-        total_elapsed_ms,
-        decision_branch,
-        conf,
-        bool(used_fallback_provider),
-        manual_mode_triggered,
-    )
+    if decision_branch == "soft_fail" and "ocr.sla.soft_fail" not in metrics_inc:
+        metrics.inc("ocr.sla.soft_fail")
+        metrics_inc.append("ocr.sla.soft_fail")
+    if decision_branch == "auto_accept" and "ocr.sla.auto_accept" not in metrics_inc:
+        metrics.inc("ocr.sla.auto_accept")
+        metrics_inc.append("ocr.sla.auto_accept")
+    if used_fallback_provider and "ocr.sla.fallback_used" not in metrics_inc:
+        metrics.inc("ocr.sla.fallback_used")
+        metrics_inc.append("ocr.sla.fallback_used")
+    if sla_breach and "ocr.sla.breach" not in metrics_inc:
+        metrics.inc("ocr.sla.breach")
+        metrics_inc.append("ocr.sla.breach")
+
+    ocr_sla_log = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "level": "INFO",
+        "logger": "OCR_SLA_DECISION",
+        "correlation_id": correlation_id,
+        "deal_id": session.get("deal_id"),
+        "lead_id": session.get("lead_id"),
+        "passport_hash": passport_hash,
+        "passport_mrz_len": passport_mrz_len,
+        "attempt_local_count": local_attempts,
+        "attempt_fallback_count": fallback_attempts,
+        "total_elapsed_ms": total_elapsed_ms,
+        "decision_branch": decision_branch,
+        "used_fallback_provider": used_fallback_provider,
+        "timeout_flag": timeout_flag,
+        "sla_breach": sla_breach,
+        "retry_reason_flags": retry_reason_flags,
+        "metrics_inc": metrics_inc,
+        "logger_version": logger_version,
+    }
+    logger.info(json.dumps(ocr_sla_log, ensure_ascii=False))
 
     if decision_branch == "soft_fail" or timeout_flag or quality.get("needs_retry"):
         reasons = _retry_reasons_from_flags(retry_reason_flags) or _quality_retry_reasons(quality)

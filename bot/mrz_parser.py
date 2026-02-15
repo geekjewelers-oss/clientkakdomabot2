@@ -1,3 +1,4 @@
+import hashlib
 import io
 import logging
 import re
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 MRZ_REGEX = re.compile(r"([A-Z0-9<]{20,})\s*[\n\r]+([A-Z0-9<]{20,})", re.MULTILINE)
 _CHECKSUM_WEIGHTS = (7, 3, 1)
 NUM_MAP = {"O": "0", "Q": "0", "I": "1", "L": "1", "B": "8", "S": "5", "G": "6"}
+
+
+def compute_mrz_hash(line1: str | None, line2: str | None) -> str | None:
+    l1 = (line1 or "").strip()
+    l2 = (line2 or "").strip()
+    if not l1 and not l2:
+        return None
+    value = f"{l1}|{l2}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest().lower()
 
 
 def image_bytes_to_pil(img_bytes):
@@ -184,25 +194,28 @@ def parse_td3_mrz(line1: str, line2: str):
 
         if not checks["passport_number"]:
             logger.warning(
-                "[OCR] MRZ checksum failed: field=passport_number raw=%s normalized=%s check_char=%s computed=%s",
-                passport_number_raw,
-                passport_number_norm,
+                "[OCR] MRZ checksum failed: field=passport_number hash=%s len=%s normalized_len=%s check_char=%s computed=%s",
+                compute_mrz_hash(passport_number_raw, None),
+                len(passport_number_raw),
+                len(passport_number_norm),
                 passport_check,
                 compute_mrz_checksum(passport_number_norm),
             )
         if not checks["birth_date"]:
             logger.warning(
-                "[OCR] MRZ checksum failed: field=birth_date raw=%s normalized=%s check_char=%s computed=%s",
-                birth_date_raw,
-                birth_date_norm,
+                "[OCR] MRZ checksum failed: field=birth_date hash=%s len=%s normalized_len=%s check_char=%s computed=%s",
+                compute_mrz_hash(birth_date_raw, None),
+                len(birth_date_raw),
+                len(birth_date_norm),
                 birth_check,
                 compute_mrz_checksum(birth_date_norm),
             )
         if not checks["expiry_date"]:
             logger.warning(
-                "[OCR] MRZ checksum failed: field=expiry_date raw=%s normalized=%s check_char=%s computed=%s",
-                expiry_raw,
-                expiry_norm,
+                "[OCR] MRZ checksum failed: field=expiry_date hash=%s len=%s normalized_len=%s check_char=%s computed=%s",
+                compute_mrz_hash(expiry_raw, None),
+                len(expiry_raw),
+                len(expiry_norm),
                 expiry_check,
                 compute_mrz_checksum(expiry_norm),
             )
@@ -213,8 +226,9 @@ def parse_td3_mrz(line1: str, line2: str):
             optional = l2[28:43]
             composite_value = part_doc + part_birth + part_exp + optional
             logger.warning(
-                "[OCR] MRZ checksum failed: field=composite value=%s check_char=%s computed=%s",
-                composite_value,
+                "[OCR] MRZ checksum failed: field=composite hash=%s len=%s check_char=%s computed=%s",
+                compute_mrz_hash(composite_value, None),
+                len(composite_value),
                 l2[43],
                 compute_mrz_checksum(composite_value),
             )

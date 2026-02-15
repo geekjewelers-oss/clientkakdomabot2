@@ -1,0 +1,5 @@
+# Suggested development dependencies for local checks and CI
+pytest
+mypy
+flake8
+black

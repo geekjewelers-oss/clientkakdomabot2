@@ -8,3 +8,4 @@ requests
 easyocr
 torch
 torchvision
+boto3

@@ -5,3 +5,6 @@ Pillow
 opencv-python
 numpy
 requests
+easyocr
+torch
+torchvision

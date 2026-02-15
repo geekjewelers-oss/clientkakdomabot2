@@ -22,7 +22,7 @@ from bot.mrz_parser import (
     parse_td3_mrz,
 )
 from bot.ocr_fallback import easyocr_extract_text
-from bot.vision_fallback import vision_extract_text
+from bot.vision_fallback import yandex_vision_extract_text
 from config import (
     BITRIX_WEBHOOK_URL,
     OPENAI_API_KEY,
@@ -31,6 +31,8 @@ from config import (
     S3_ENDPOINT_URL,
     S3_SECRET_KEY,
     TELEGRAM_TOKEN,
+    YANDEX_VISION_API_KEY,
+    YANDEX_VISION_FOLDER_ID,
 )
 
 # ----------------- Настройка логирования -----------------
@@ -196,16 +198,26 @@ async def passport_received(message: types.Message, state: FSMContext):
     img_bytes = file_bytes.read()  # bytes
 
     await message.answer("Получил фото. Пытаюсь распознать MRZ и извлечь данные... Пару секунд.")
-    ocr_result = ocr_pipeline_extract(img_bytes)
+    # извлекаем текст (local OCR)
+    text = extract_text_from_image_bytes(img_bytes)
+    l1, l2 = find_mrz_from_text(text)
+    parsed = {}
+    if l1 and l2:
+        logger.info("MRZ found")
+        parsed = parse_td3_mrz(l1, l2)
+        parsed['_mrz_raw'] = (l1, l2)
+        parsed['_ocr_text_sample'] = text[:400]
+        # сохраняем промежуточно
+    else:
+        logger.info("MRZ not found — running EasyOCR")
+        fallback_text = easyocr_extract_text(img_bytes)
+        if len(fallback_text.strip()) < 20:
+            logger.info("EasyOCR weak — running Vision API")
+            if YANDEX_VISION_API_KEY and YANDEX_VISION_FOLDER_ID:
+                fallback_text = yandex_vision_extract_text(img_bytes) or fallback_text
 
-    parsed = ocr_result.get("parsed") or {}
-    parsed['_mrz_raw'] = ocr_result.get("mrz_lines")
-    parsed['_ocr_text_sample'] = (ocr_result.get("text") or "")[:400]
-    parsed['_ocr_source'] = ocr_result.get("source")
-    parsed['_ocr_confidence'] = ocr_result.get("confidence")
-
-    if ocr_result.get("confidence") == "low":
-        parsed["needs_better_photo"] = True
+        parsed['_mrz_raw'] = None
+        parsed['_ocr_text_sample'] = (fallback_text or text)[:400]
 
     # Сохраним временные данные в state
     tmp = {"parsed": parsed}

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 MRZ_REGEX = re.compile(r"([A-Z0-9<]{20,})\s*[\n\r]+([A-Z0-9<]{20,})", re.MULTILINE)
 _CHECKSUM_WEIGHTS = (7, 3, 1)
+NUM_MAP = {"O": "0", "Q": "0", "I": "1", "L": "1", "B": "8", "S": "5", "G": "6"}
 
 
 def image_bytes_to_pil(img_bytes):
@@ -113,10 +114,31 @@ def compute_mrz_checksum(value: str) -> int:
     return total % 10
 
 
+def normalize_for_numeric(s: str) -> str:
+    s = s.upper()
+    return "".join(NUM_MAP.get(ch, ch) for ch in s)
+
+
 def validate_mrz_checksum(value: str, check_char: str) -> bool:
     if not check_char or not check_char.isdigit():
         return False
     return compute_mrz_checksum(value) == int(check_char)
+
+
+def validate_td3_composite(l2: str) -> bool:
+    """Validate TD3 composite checksum from line 2 (position 43)."""
+    if len(l2) < 44:
+        l2 = l2 + "<" * (44 - len(l2))
+
+    composite_check = l2[43]
+
+    part_doc = normalize_for_numeric(l2[0:10])     # passport + check
+    part_birth = normalize_for_numeric(l2[13:20])  # birth + check
+    part_exp = normalize_for_numeric(l2[21:28])    # expiry + check
+    optional = l2[28:43]                           # may contain letters → no normalize
+
+    composite_value = part_doc + part_birth + part_exp + optional
+    return validate_mrz_checksum(composite_value, composite_check)
 
 
 def parse_td3_mrz(line1: str, line2: str):
@@ -125,7 +147,7 @@ def parse_td3_mrz(line1: str, line2: str):
     l1 = line1 + "<" * (44 - len(line1)) if len(line1) < 44 else line1
     l2 = line2 + "<" * (44 - len(line2)) if len(line2) < 44 else line2
     data = {}
-    checksum_ok = True
+    checks = {}
     try:
         # line1
         data['document_type'] = l1[0]
@@ -144,6 +166,10 @@ def parse_td3_mrz(line1: str, line2: str):
         expiry_raw = l2[21:27]
         expiry_check = l2[27]
 
+        passport_number_norm = normalize_for_numeric(passport_number_raw)
+        birth_date_norm = normalize_for_numeric(birth_date_raw)
+        expiry_norm = normalize_for_numeric(expiry_raw)
+
         data['passport_number'] = passport_number_raw.replace('<', '').strip()
         data['passport_number_check'] = passport_check
         data['nationality'] = l2[10:13].replace('<', '').strip()
@@ -151,18 +177,60 @@ def parse_td3_mrz(line1: str, line2: str):
         data['sex'] = l2[20]
         data['expiry_date'] = f"{expiry_raw[0:2]}{expiry_raw[2:4]}{expiry_raw[4:6]}"
 
-        if not validate_mrz_checksum(passport_number_raw, passport_check):
-            logger.warning("[OCR] MRZ checksum failed: field=passport_number")
-            checksum_ok = False
-        if not validate_mrz_checksum(birth_date_raw, birth_check):
-            logger.warning("[OCR] MRZ checksum failed: field=birth_date")
-            checksum_ok = False
-        if not validate_mrz_checksum(expiry_raw, expiry_check):
-            logger.warning("[OCR] MRZ checksum failed: field=expiry_date")
-            checksum_ok = False
+        checks["passport_number"] = validate_mrz_checksum(passport_number_norm, passport_check)
+        checks["birth_date"] = validate_mrz_checksum(birth_date_norm, birth_check)
+        checks["expiry_date"] = validate_mrz_checksum(expiry_norm, expiry_check)
+        checks["composite"] = validate_td3_composite(l2)
+
+        if not checks["passport_number"]:
+            logger.warning(
+                "[OCR] MRZ checksum failed: field=passport_number raw=%s normalized=%s check_char=%s computed=%s",
+                passport_number_raw,
+                passport_number_norm,
+                passport_check,
+                compute_mrz_checksum(passport_number_norm),
+            )
+        if not checks["birth_date"]:
+            logger.warning(
+                "[OCR] MRZ checksum failed: field=birth_date raw=%s normalized=%s check_char=%s computed=%s",
+                birth_date_raw,
+                birth_date_norm,
+                birth_check,
+                compute_mrz_checksum(birth_date_norm),
+            )
+        if not checks["expiry_date"]:
+            logger.warning(
+                "[OCR] MRZ checksum failed: field=expiry_date raw=%s normalized=%s check_char=%s computed=%s",
+                expiry_raw,
+                expiry_norm,
+                expiry_check,
+                compute_mrz_checksum(expiry_norm),
+            )
+        if not checks["composite"]:
+            part_doc = normalize_for_numeric(l2[0:10])
+            part_birth = normalize_for_numeric(l2[13:20])
+            part_exp = normalize_for_numeric(l2[21:28])
+            optional = l2[28:43]
+            composite_value = part_doc + part_birth + part_exp + optional
+            logger.warning(
+                "[OCR] MRZ checksum failed: field=composite value=%s check_char=%s computed=%s",
+                composite_value,
+                l2[43],
+                compute_mrz_checksum(composite_value),
+            )
     except Exception as e:
         logger.exception("[OCR] Error parsing MRZ: %s", e)
-        checksum_ok = False
+        checks = {"passport_number": False, "birth_date": False, "expiry_date": False, "composite": False}
+
+    check_weights = {
+        "passport_number": 0.2,
+        "birth_date": 0.2,
+        "expiry_date": 0.2,
+        "composite": 0.4,
+    }
+    mrz_confidence_score = sum(weight for key, weight in check_weights.items() if checks.get(key))
+    checksum_ok = all(checks.get(key, False) for key in check_weights)
 
     data["_mrz_checksum_ok"] = checksum_ok
+    data["mrz_confidence_score"] = float(mrz_confidence_score)
     return data

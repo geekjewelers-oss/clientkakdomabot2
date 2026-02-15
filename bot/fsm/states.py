@@ -7,6 +7,8 @@ class Form(StatesGroup):
     ask_address = State()
     ask_num_people = State()
     ask_passport_photo = State()
+    rescan_passport = State()
+    manual_input_mode = State()
     confirm_passport_fields = State()
     ask_add_another_passport = State()
     ask_contacts = State()

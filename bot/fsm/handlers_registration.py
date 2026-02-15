@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Any
 
 from aiogram import F, Router
+
+import config
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -50,6 +52,9 @@ def _new_session() -> dict[str, Any]:
         "phone": None,
         "move_in_date": None,
         "payment": {},
+        "ocr_cycle_counter": 0,
+        "ocr_retry_counter": 0,
+        "last_ocr_decision": None,
     }
 
 
@@ -85,6 +90,37 @@ def _quality_retry_reasons(quality: dict[str, Any]) -> list[str]:
     if float(quality.get("exposure_score", 1.0)) < 0.5:
         reasons.append("Слишком темное/светлое фото")
     return reasons
+
+
+def _retry_reasons_from_flags(flags: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if flags.get("blur_bad"):
+        reasons.append("Фото размыто")
+    if flags.get("exposure_bad"):
+        reasons.append("Слишком темное/светлое фото")
+    if flags.get("checksum_fail"):
+        reasons.append("MRZ не читается")
+    if flags.get("low_confidence"):
+        reasons.append("Низкая уверенность OCR")
+    if flags.get("timeout"):
+        reasons.append("Превышен таймаут OCR")
+    if flags.get("fallback_used"):
+        reasons.append("Использован fallback OCR")
+    return reasons
+
+
+def _parse_manual_passport_input(raw_text: str) -> dict[str, str] | None:
+    parts = [part.strip() for part in raw_text.split(";")]
+    if len(parts) != 6:
+        return None
+    return {
+        "surname": parts[0],
+        "given_names": parts[1],
+        "passport_number": parts[2],
+        "nationality": parts[3],
+        "birth_date": parts[4],
+        "expiry_date": parts[5],
+    }
 
 
 async def _get_session(state: FSMContext) -> dict[str, Any]:
@@ -361,15 +397,15 @@ async def process_num_people(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Form.ask_passport_photo, ~F.photo)
+@router.message(Form.rescan_passport, ~F.photo)
 async def process_passport_not_photo(message: Message) -> None:
     await message.answer("На этом шаге нужно отправить фотографию паспорта.")
 
 
-@router.message(Form.ask_passport_photo, F.photo)
-async def process_passport_photo(message: Message, state: FSMContext) -> None:
+async def _process_passport_photo_common(message: Message, state: FSMContext, *, source_state: str) -> None:
     session = await _get_session(state)
     passport_index = session.get("current_passport_index", 1)
-    logger.info("FSM step entered: ask_passport_photo | passport index=%s", passport_index)
+    logger.info("FSM step entered: %s | passport index=%s", source_state, passport_index)
 
     photo = message.photo[-1]
     file = await message.bot.get_file(photo.file_id)
@@ -387,9 +423,30 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
     quality = ocr_result.get("quality") or {}
     conf = float(quality.get("confidence", 0.0))
 
+    decision_branch = ocr_result.get("decision_branch") or "soft_fail"
+    timeout_flag = bool(ocr_result.get("timeout_flag", False))
+    retry_reason_flags = ocr_result.get("retry_reason_flags") or {}
+    local_attempts = int(ocr_result.get("attempt_local_count", 0))
+    fallback_attempts = int(ocr_result.get("attempt_fallback_count", 0))
+    total_elapsed_ms = int(ocr_result.get("total_elapsed_ms", 0))
+    used_fallback_provider = ocr_result.get("used_fallback_provider")
+
     session["passport_quality"] = quality
     session["passport_confidence"] = conf
     session["passport_needs_retry"] = bool(quality.get("needs_retry", False))
+    session["last_ocr_decision"] = decision_branch
+    session["ocr_retry_reason_flags"] = retry_reason_flags
+    session["ocr_retry_counter"] = int(session.get("ocr_retry_counter", 0)) + 1
+
+    manual_mode_triggered = False
+    if decision_branch == "soft_fail":
+        session["ocr_cycle_counter"] = int(session.get("ocr_cycle_counter", 0)) + 1
+        if (
+            config.OCR_SLA_MANUAL_INPUT_AFTER_SECOND_CYCLE
+            and int(session.get("ocr_cycle_counter", 0)) >= 2
+        ):
+            manual_mode_triggered = True
+
     await state.update_data(session=session)
 
     logger.info(
@@ -402,35 +459,61 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
 
     logger.info("[OCR] handler stage: source=%s, confidence=%s, text_len=%d", source, confidence, len(text))
 
-    if not parsed_fields:
-        await message.answer(
-            "Не удалось распознать паспортные данные. Отправьте более четкое фото этого же паспорта."
+    logger.info(
+        "OCR_SLA_DECISION passport_index=%s local_attempts=%s fallback_attempts=%s total_time=%s decision=%s confidence=%.2f used_fallback=%s manual_mode_triggered=%s",
+        passport_index,
+        local_attempts,
+        fallback_attempts,
+        total_elapsed_ms,
+        decision_branch,
+        conf,
+        bool(used_fallback_provider),
+        manual_mode_triggered,
+    )
+
+    if decision_branch == "soft_fail" or timeout_flag or quality.get("needs_retry"):
+        reasons = _retry_reasons_from_flags(retry_reason_flags) or _quality_retry_reasons(quality)
+        reasons_text = f"\nПричины: {', '.join(reasons)}." if reasons else ""
+
+        if manual_mode_triggered:
+            await _go_to_step(
+                message,
+                state,
+                next_state=Form.manual_input_mode,
+                text=(
+                    "Автораспознавание не удалось после двух циклов. "
+                    "Перейдите к ручному вводу в формате:\n"
+                    "Фамилия;Имя;Номер паспорта;Гражданство;Дата рождения;Срок действия"
+                ),
+                keyboard=back_kb(),
+                log_step=f"manual_input_mode | passport index={passport_index}",
+            )
+            return
+
+        await _go_to_step(
+            message,
+            state,
+            next_state=Form.rescan_passport,
+            text=(
+                "Фото плохо читается. Пожалуйста пришлите более четкое фото паспорта "
+                "(без бликов, полностью MRZ зона)."
+                f"{reasons_text}"
+            ),
+            keyboard=bad_photo_kb(),
+            log_step=f"rescan_passport | passport index={passport_index}",
         )
         return
 
-    auto_confirm_passport = False
-    if conf >= 0.80:
-        auto_confirm_passport = True
+    auto_confirm_passport = decision_branch == "auto_accept"
 
-    reasons = _quality_retry_reasons(quality) if quality.get("needs_retry") else []
-    logger.info(
-        "OCR_DECISION: passport_index=%s auto_confirm=%s preview_required=%s needs_retry=%s conf=%.2f blur=%.1f exposure=%.2f reasons=%s",
-        passport_index,
-        auto_confirm_passport,
-        conf >= 0.55 and not auto_confirm_passport,
-        quality.get("needs_retry", False),
-        conf,
-        float(quality.get("blur_score") or 0.0),
-        float(quality.get("exposure_score") or 0.0),
-        ";".join(reasons) if reasons else "",
-    )
-
-    if quality.get("needs_retry"):
-        reasons_text = f"\nПричины: {', '.join(reasons)}." if reasons else ""
-        await message.answer(
-            "Фото плохо читается. Пожалуйста пришлите более четкое фото паспорта "
-            "(без бликов, полностью MRZ зона)."
-            f"{reasons_text}"
+    if not parsed_fields:
+        await _go_to_step(
+            message,
+            state,
+            next_state=Form.rescan_passport,
+            text="Не удалось распознать паспортные данные. Отправьте более четкое фото этого же паспорта.",
+            keyboard=bad_photo_kb(),
+            log_step=f"rescan_passport | passport index={passport_index}",
         )
         return
 
@@ -478,19 +561,63 @@ async def process_passport_photo(message: Message, state: FSMContext) -> None:
         )
         return
 
-    if conf >= 0.55:
-        await _go_to_step(
-            message,
-            state,
-            next_state=Form.confirm_passport_fields,
-            text=f"Паспорт №{passport_index} распознан:\n\n{parsed_text}\n\nВсе верно?",
-            keyboard=retry_passport_kb(),
-            log_step=f"confirm_passport_fields | passport index={passport_index}",
+    await _go_to_step(
+        message,
+        state,
+        next_state=Form.confirm_passport_fields,
+        text=f"Паспорт №{passport_index} распознан:\n\n{parsed_text}\n\nВсе верно?",
+        keyboard=retry_passport_kb(),
+        log_step=f"confirm_passport_fields | passport index={passport_index}",
+    )
+
+
+@router.message(Form.ask_passport_photo, F.photo)
+async def process_passport_photo(message: Message, state: FSMContext) -> None:
+    await _process_passport_photo_common(message, state, source_state="ask_passport_photo")
+
+
+@router.message(Form.rescan_passport, F.photo)
+async def process_passport_rescan_photo(message: Message, state: FSMContext) -> None:
+    await _process_passport_photo_common(message, state, source_state="rescan_passport")
+
+
+@router.message(Form.manual_input_mode)
+async def process_manual_input_mode(message: Message, state: FSMContext) -> None:
+    session = await _get_session(state)
+    passport_index = session.get("current_passport_index", 1)
+    parsed = _parse_manual_passport_input((message.text or "").strip())
+    if not parsed:
+        await message.answer(
+            "Неверный формат. Введите данные так:\nФамилия;Имя;Номер паспорта;Гражданство;Дата рождения;Срок действия"
         )
         return
 
-    await message.answer(
-        "Фото плохо читается. Пожалуйста пришлите более четкое фото паспорта (без бликов, полностью MRZ зона)."
+    passport_entry = {
+        "index": passport_index,
+        "photo_file_id": None,
+        "parsed": parsed,
+        "mrz_lines": None,
+        "ocr_source": "manual_input",
+        "ocr_confidence": "manual",
+        "ocr_quality": session.get("passport_quality", {}),
+        "ocr_blur": None,
+        "ocr_exposure": None,
+        "confirmed": True,
+    }
+
+    passports = [p for p in session.get("passports", []) if p.get("index") != passport_index]
+    passports.append(passport_entry)
+    passports.sort(key=lambda x: x["index"])
+    session["passports"] = passports
+    await state.update_data(session=session)
+
+    await _go_to_step(
+        message,
+        state,
+        next_state=Form.ask_add_another_passport,
+        text=f"Паспорт №{passport_index} сохранен в ручном режиме.",
+        keyboard=add_another_keyboard(),
+        log_step=f"ask_add_another_passport | passport index={passport_index}",
     )
 
 

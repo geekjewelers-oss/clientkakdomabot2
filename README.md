@@ -61,3 +61,14 @@ python bot/main.py
 - Парсинг основных полей паспорта (TD3).
 - Показ распознанных данных и кнопка **"Все верно"**.
 - Заглушки для будущей интеграции с Bitrix и S3.
+
+## OCR SLA logging and metrics
+
+- OCR SLA decisions are emitted as structured JSON with `logger=OCR_SLA_DECISION` and `logger_version=ocr_sla_v1`.
+- Sensitive MRZ values are never logged directly; use `passport_hash` and `passport_mrz_len` only.
+- Metrics are disabled by default and controlled by:
+  - `OCR_LOG_METRICS_ENABLED` (`false` by default)
+  - `OCR_METRICS_BACKEND` (`noop`, `prometheus`, `statsd`)
+  - `OCR_SLA_BREACH_THRESHOLD_RATIO` (`0.9` by default)
+
+See `SECURITY.md` for privacy rules.

@@ -17,8 +17,8 @@ from docxtpl import DocxTemplate
 
 from bot.bitrix_api import bitrix_call, create_lead_and_deal
 from bot.mrz_parser import (
+    extract_mrz_from_image_bytes,
     extract_text_from_image_bytes,
-    find_mrz_from_text,
     parse_td3_mrz,
 )
 from bot.ocr_fallback import easyocr_extract_text
@@ -88,7 +88,59 @@ def upload_fileobj_to_s3(fileobj, filename, content_type="application/octet-stre
 
 # ----------------- OCR / MRZ extraction -----------------
 
+def ocr_pipeline_extract(img_bytes) -> dict:
+    line1, line2, mrz_text, _mode = extract_mrz_from_image_bytes(img_bytes)
+    if line1 and line2:
+        parsed = parse_td3_mrz(line1, line2)
+        checksum_ok = parsed.get("_mrz_checksum_ok", False)
+        confidence = "high" if checksum_ok else "medium"
+        source = "mrz"
+        text_value = mrz_text
+        logger.info("[OCR] OCR stage: mrz, text_len=%s", len(text_value or ""))
+        return {
+            "text": text_value or "",
+            "source": source,
+            "confidence": confidence,
+            "parsed": parsed,
+            "mrz_lines": (line1, line2),
+        }
+
+    text = extract_text_from_image_bytes(img_bytes)
+    logger.info("[OCR] OCR stage: tesseract, text_len=%s", len(text or ""))
+
+    easy_text = easyocr_extract_text(img_bytes)
+    logger.info("[OCR] OCR stage: easyocr, text_len=%s", len(easy_text or ""))
+    if easy_text and len(easy_text) > 40:
+        return {
+            "text": easy_text,
+            "source": "easyocr",
+            "confidence": "medium",
+            "parsed": {},
+            "mrz_lines": None,
+        }
+
+    vision_text = vision_extract_text(img_bytes, current_text=easy_text or text, min_len_for_skip=60)
+    logger.info("[OCR] OCR stage: vision, text_len=%s", len(vision_text or ""))
+
+    if vision_text:
+        return {
+            "text": vision_text,
+            "source": "vision",
+            "confidence": "medium",
+            "parsed": {},
+            "mrz_lines": None,
+        }
+
+    return {
+        "text": easy_text or text or "",
+        "source": "tesseract",
+        "confidence": "low",
+        "parsed": {},
+        "mrz_lines": None,
+    }
+
 # ----------------- Bitrix helper (webhook-based) -----------------
+
 # ----------------- Документы: генерация docx по шаблону -----------------
 def generate_contract_docx(template_path, out_path, context: dict):
     doc = DocxTemplate(template_path)

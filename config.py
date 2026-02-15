@@ -4,6 +4,33 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")

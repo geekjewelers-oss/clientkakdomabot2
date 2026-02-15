@@ -2,6 +2,7 @@ import logging
 
 import requests
 
+from bot.bitrix_fields import BITRIX_DEAL_FIELDS
 from config import BITRIX_WEBHOOK_URL
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,12 @@ def create_lead_and_deal(client_data):
         "CURRENCY_ID": "RUB",
         "LEAD_ID": lead_id,
     }
+
+    for client_key, bitrix_field in BITRIX_DEAL_FIELDS.items():
+        value = client_data.get(client_key)
+        if value:
+            deal_fields[bitrix_field] = value
+
     res_deal = bitrix_call("crm.deal.add", {"fields": deal_fields})
     deal_id = None
     if res_deal and 'result' in res_deal:

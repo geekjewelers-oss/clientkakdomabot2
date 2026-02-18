@@ -8,3 +8,9 @@ requests
 easyocr
 torch
 torchvision
+fastapi
+httpx
+pydantic>=2
+pydantic-settings
+structlog
+pytest

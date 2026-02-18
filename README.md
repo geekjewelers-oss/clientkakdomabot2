@@ -72,3 +72,17 @@ python bot/main.py
   - `OCR_SLA_BREACH_THRESHOLD_RATIO` (`0.9` by default)
 
 See `SECURITY.md` for privacy rules.
+
+## OCR Orchestrator API (FastAPI)
+
+Добавлен production-ready модуль `ocr_service` с endpoint'ами:
+- `POST /v1/ocr/submit`
+- `GET /v1/ocr/job/{job_id}`
+- `POST /v1/ocr/manual-review/{job_id}`
+- `POST /internal/webhooks/ocr-result`
+
+Запуск:
+
+```bash
+uvicorn ocr_service.app:app --reload
+```

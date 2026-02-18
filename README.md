@@ -86,3 +86,68 @@ See `SECURITY.md` for privacy rules.
 ```bash
 uvicorn ocr_service.app:app --reload
 ```
+
+## Bitrix24 CRM integration (async, production)
+
+Добавлен production-коннектор `BitrixConnector` для OCR/Telegram registration потока:
+
+- Файлы:
+  - `connectors/bitrix_connector.py`
+  - `schemas/bitrix_models.py`
+  - `tests/test_bitrix_connector.py`
+- Python 3.11 async + `httpx.AsyncClient` only.
+- Retry: exponential backoff + jitter, обработка `429` + `Retry-After`, retry для `5xx` и network ошибок.
+- Multi-tenant credentials через `BitrixTenantCredentials` и `tenant_id`.
+- Correlation ID: заголовок `X-Correlation-ID` добавляется в каждый запрос.
+- Idempotency: поддержка `Idempotency-Key` + in-process cache для безопасных повторов.
+- Structured logs: через `structlog`.
+- Security:
+  - В CRM отправляется только `passport_hash` (`UF_PASSPORT_HASH`).
+  - Raw номер паспорта не используется.
+  - Логи маскируют `UF_PASSPORT_HASH`.
+
+### OCRResult → Bitrix UF_* strict mapping
+
+- `UF_PASSPORT_HASH`
+- `UF_NATIONALITY`
+- `UF_BIRTH_DATE`
+- `UF_DOC_EXPIRY`
+- `UF_OCR_CONFIDENCE`
+- `UF_DUPLICATE_FLAG`
+
+Маппинг реализован в `OCRBitrixFields.to_bitrix_uf_fields()` и запрещает лишние поля (`extra="forbid"`).
+
+### Пример использования
+
+```python
+from connectors.bitrix_connector import BitrixConnector
+from schemas.bitrix_models import BitrixTenantCredentials, OCRBitrixFields, ResidentData
+
+connector = BitrixConnector(
+    tenants={
+        "tenant-a": BitrixTenantCredentials(
+            tenant_id="tenant-a",
+            webhook_base_url="https://<portal>/rest/<user>/<webhook>",
+        )
+    }
+)
+
+contact_id = await connector.create_contact(
+    ResidentData(
+        tenant_id="tenant-a",
+        correlation_id="corr-12345678",
+        idempotency_key="registration-<unique>",
+        first_name="Ivan",
+        last_name="Petrov",
+        phone="+79001112233",
+        ocr=OCRBitrixFields(
+            passport_hash="sha256:...",
+            nationality="RU",
+            birth_date="1990-01-01",
+            doc_expiry="2030-01-01",
+            ocr_confidence=0.97,
+            duplicate_flag=False,
+        ),
+    )
+)
+```

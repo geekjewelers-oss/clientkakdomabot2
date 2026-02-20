@@ -2,8 +2,9 @@ import asyncio
 import io
 import logging
 import os
+import re
 import uuid
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 import aiohttp
 import boto3
@@ -38,14 +39,251 @@ SEEN_HASHES_LOCAL: set[str] = set()
 
 
 class PassportFlow(StatesGroup):
+    waiting_manager_code = State()
+    waiting_district = State()
+    waiting_district_text = State()
+    waiting_address = State()
+    waiting_resident_count = State()
+    waiting_resident_count_text = State()
+    waiting_move_date = State()
+    waiting_phone = State()
+    waiting_passport_photo = State()
+    waiting_passport_confirm = State()
+    waiting_final_confirm = State()
+    waiting_final_answer = State()
     waiting_confirmation = State()
 
 
-async def cmd_start(message: Message) -> None:
-    await message.answer("Привет! Отправьте фото паспорта, и я попробую распознать MRZ-данные.")
+def district_keyboard() -> InlineKeyboardMarkup:
+    districts = ["Центр", "Северный", "Южный", "Западный", "Восточный", "Другой"]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=name, callback_data=f"district_{name}")] for name in districts
+        ]
+    )
 
 
-async def handle_photo(message: Message, bot: Bot, state: FSMContext) -> None:
+def resident_count_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="1", callback_data="count_1")],
+            [InlineKeyboardButton(text="2", callback_data="count_2")],
+            [InlineKeyboardButton(text="3", callback_data="count_3")],
+            [InlineKeyboardButton(text="4", callback_data="count_4")],
+            [InlineKeyboardButton(text="5+", callback_data="count_5+")],
+        ]
+    )
+
+
+def passport_confirm_keyboard(low_confidence: bool) -> InlineKeyboardMarkup:
+    confirm_text = "✅ Подтверждено" if low_confidence else "✅ Верно"
+    rows = [[InlineKeyboardButton(text=confirm_text, callback_data="all_correct_passport")]]
+    if low_confidence:
+        rows.append([InlineKeyboardButton(text="✏️ Исправить", callback_data="edit_passport")])
+    rows.append([InlineKeyboardButton(text="🔄 Переснять", callback_data="retake_passport")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def final_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить и отправить", callback_data="final_confirm")],
+            [InlineKeyboardButton(text="❌ Начать заново", callback_data="restart")],
+        ]
+    )
+
+
+def mask_passport_number(value: str) -> str:
+    if len(value) >= 4:
+        return f"{value[:2]}***{value[-2:]}"
+    return value
+
+
+async def ask_manager_code(message: Message, state: FSMContext) -> None:
+    await state.set_state(PassportFlow.waiting_manager_code)
+    await message.answer("Введите код менеджера:")
+
+
+async def ask_district(message: Message, state: FSMContext) -> None:
+    await state.set_state(PassportFlow.waiting_district)
+    await message.answer("Укажите район объекта:", reply_markup=district_keyboard())
+
+
+async def ask_address(message: Message, state: FSMContext) -> None:
+    await state.set_state(PassportFlow.waiting_address)
+    await message.answer("Введите адрес объекта (улица, дом, квартира):")
+
+
+async def ask_resident_count(message: Message, state: FSMContext) -> None:
+    await state.set_state(PassportFlow.waiting_resident_count)
+    await message.answer("Сколько жильцов будет проживать?", reply_markup=resident_count_keyboard())
+
+
+async def ask_move_date(message: Message, state: FSMContext) -> None:
+    await state.set_state(PassportFlow.waiting_move_date)
+    await message.answer("Дата заезда (ДД.ММ.ГГГГ):")
+
+
+async def ask_phone(message: Message, state: FSMContext) -> None:
+    await state.set_state(PassportFlow.waiting_phone)
+    await message.answer("Телефон основного жильца (+7XXXXXXXXXX):")
+
+
+async def ask_passport_photo(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    resident_count = int(data.get("resident_count", 1))
+    index = int(data.get("current_resident_index", 0))
+    await state.set_state(PassportFlow.waiting_passport_photo)
+    await message.answer(f"Жилец {index + 1} из {resident_count}. Отправьте фото паспорта.")
+
+
+async def send_final_summary(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    residents = data.get("residents", [])
+    low_quality_count = sum(1 for resident in residents if float(resident.get("confidence_score", 0.0)) < 0.80)
+
+    lines = [
+        "Проверьте итоговые данные:",
+        f"Код менеджера: {data.get('manager_code', '')}",
+        f"Район: {data.get('district', '')}",
+        f"Адрес: {data.get('address', '')}",
+        f"Дата заезда: {data.get('move_date', '')}",
+        f"Телефон: {data.get('phone', '')}",
+        "",
+        "Жильцы:",
+    ]
+
+    for idx, resident in enumerate(residents, start=1):
+        lines.extend(
+            [
+                f"{idx}) {resident.get('surname', '')} {resident.get('given_names', '')}",
+                f"   Гражданство: {resident.get('nationality', '')}",
+                f"   Дата рождения: {resident.get('date_of_birth', '')}",
+                f"   Паспорт: {mask_passport_number(resident.get('passport_number', ''))}",
+            ]
+        )
+
+    if low_quality_count:
+        lines.append(f"\nВнимание: {low_quality_count} паспортов с низким качеством ⚠️")
+    else:
+        lines.append("\nВсе паспорта распознаны ✅")
+
+    await state.set_state(PassportFlow.waiting_final_answer)
+    await message.answer("\n".join(lines), reply_markup=final_keyboard())
+
+
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await ask_manager_code(message, state)
+
+
+async def handle_manager_code(message: Message, state: FSMContext) -> None:
+    manager_code = (message.text or "").strip()
+    if not manager_code or not re.fullmatch(r"[A-Za-z0-9]{4,12}", manager_code):
+        await message.answer("Неверный код менеджера. Попробуйте ещё раз.")
+        return
+
+    await state.update_data(manager_code=manager_code)
+    await ask_district(message, state)
+
+
+async def handle_district_select(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if await state.get_state() != PassportFlow.waiting_district.state:
+        return
+
+    district = (callback.data or "").replace("district_", "", 1)
+    if district == "Другой":
+        await state.set_state(PassportFlow.waiting_district_text)
+        await callback.message.answer("Введите район объекта текстом:")
+        return
+
+    await state.update_data(district=district)
+    await ask_address(callback.message, state)
+
+
+async def handle_district_text(message: Message, state: FSMContext) -> None:
+    district = (message.text or "").strip()
+    if not district:
+        await message.answer("Неверный район. Попробуйте ещё раз.")
+        return
+
+    await state.update_data(district=district)
+    await ask_address(message, state)
+
+
+async def handle_address(message: Message, state: FSMContext) -> None:
+    address = (message.text or "").strip()
+    if len(address) < 5:
+        await message.answer("Адрес слишком короткий. Введите минимум 5 символов.")
+        return
+
+    await state.update_data(address=address)
+    await ask_resident_count(message, state)
+
+
+async def handle_count_select(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if await state.get_state() != PassportFlow.waiting_resident_count.state:
+        return
+
+    value = (callback.data or "").replace("count_", "", 1)
+    if value == "5+":
+        await state.set_state(PassportFlow.waiting_resident_count_text)
+        await callback.message.answer("Введите количество жильцов (от 5 до 20):")
+        return
+
+    resident_count = int(value)
+    await state.update_data(resident_count=resident_count, residents=[], current_resident_index=0, retry_count=0)
+    await ask_move_date(callback.message, state)
+
+
+async def handle_resident_count_text(message: Message, state: FSMContext) -> None:
+    raw_value = (message.text or "").strip()
+    if not raw_value.isdigit():
+        await message.answer("Введите целое число от 5 до 20.")
+        return
+
+    resident_count = int(raw_value)
+    if resident_count < 5 or resident_count > 20:
+        await message.answer("Введите целое число от 5 до 20.")
+        return
+
+    await state.update_data(resident_count=resident_count, residents=[], current_resident_index=0, retry_count=0)
+    await ask_move_date(message, state)
+
+
+async def handle_move_date(message: Message, state: FSMContext) -> None:
+    raw_date = (message.text or "").strip()
+    try:
+        parsed_date = datetime.strptime(raw_date, "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer("Неверный формат даты. Используйте ДД.ММ.ГГГГ.")
+        return
+
+    if parsed_date < date.today():
+        await message.answer("Дата заезда не может быть в прошлом.")
+        return
+
+    await state.update_data(move_date=raw_date)
+    await ask_phone(message, state)
+
+
+async def handle_phone(message: Message, state: FSMContext) -> None:
+    raw_phone = re.sub(r"\s+", "", message.text or "")
+    if not re.fullmatch(r"(\+7|8)\d{10}", raw_phone):
+        await message.answer("Неверный формат телефона. Используйте +7XXXXXXXXXX или 8XXXXXXXXXX.")
+        return
+
+    if raw_phone.startswith("8"):
+        raw_phone = "+7" + raw_phone[1:]
+
+    await state.update_data(phone=raw_phone)
+    await ask_passport_photo(message, state)
+
+
+async def handle_passport_photo(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
     correlation_id = str(uuid.uuid4())
     photo = message.photo[-1]
 
@@ -55,7 +293,7 @@ async def handle_photo(message: Message, bot: Bot, state: FSMContext) -> None:
         await bot.download(file, destination=buf)
         image_bytes = buf.getvalue()
     except Exception as exc:
-        logger.error("{\"event\":\"download_failed\",\"correlation_id\":\"%s\",\"error\":\"%s\"}", correlation_id, exc)
+        logger.error('{"event":"download_failed","correlation_id":"%s","error":"%s"}', correlation_id, exc)
         await message.answer("Не удалось обработать фото. Попробуйте ещё раз.")
         return
 
@@ -63,7 +301,12 @@ async def handle_photo(message: Message, bot: Bot, state: FSMContext) -> None:
     fields = ocr_result.get("fields", {})
 
     if not fields:
-        await message.answer("Не удалось распознать MRZ. Пожалуйста, отправьте более чёткое фото.")
+        retry_count = int(data.get("retry_count", 0)) + 1
+        await state.update_data(retry_count=retry_count)
+        if retry_count >= 3:
+            await message.answer("Не удалось распознать документ после 3 попыток. Пожалуйста, отправьте более чёткое фото.")
+        else:
+            await message.answer("Не удалось распознать MRZ. Пожалуйста, отправьте более чёткое фото.")
         return
 
     passport_hash = fields.get("passport_hash", "")
@@ -73,86 +316,169 @@ async def handle_photo(message: Message, bot: Bot, state: FSMContext) -> None:
         passport_hash=passport_hash,
     )
 
-    await state.update_data(
-        correlation_id=correlation_id,
-        fields=fields,
-        confidence_score=ocr_result.get("confidence_score", 0.0),
-        parsing_source=ocr_result.get("parsing_source", "MRZ_local"),
-        auto_accepted=ocr_result.get("auto_accepted", False),
-        sla_breach=ocr_result.get("sla_breach", False),
-        passport_hash=passport_hash,
-        presigned_url=presigned_url,
-    )
-    await state.set_state(PassportFlow.waiting_confirmation)
-
-    response = (
-        "Распознанные данные:\n"
-        f"Фамилия: {fields.get('surname', '')}\n"
-        f"Имя: {fields.get('given_names', '')}\n"
-        f"Дата рождения: {fields.get('date_of_birth', '')}\n"
-        f"Гражданство: {fields.get('nationality', '')}\n\n"
-        "Проверьте, пожалуйста, корректность данных."
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Всё верно", callback_data="all_correct")]]
-    )
-    await message.answer(response, reply_markup=keyboard)
-
-
-async def on_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    if not data:
-        await callback.message.answer("Сессия устарела. Пожалуйста, отправьте фото паспорта заново.")
-        await state.clear()
-        await callback.answer()
-        return
-
-    correlation_id = data.get("correlation_id", str(uuid.uuid4()))
-    passport_hash = data.get("passport_hash", "")
-
-    if not passport_hash:
-        await callback.message.answer("Недостаточно данных для регистрации. Отправьте фото ещё раз.")
-        await state.clear()
-        return
-
-    duplicate = await is_duplicate_hash(bot, passport_hash)
-    if duplicate:
-        await callback.message.answer("Этот документ уже зарегистрирован")
-        await state.clear()
-        return
-
-    await remember_hash(bot, passport_hash)
-
-    bitrix_payload = {
-        "NAME": data.get("fields", {}).get("given_names", ""),
-        "LAST_NAME": data.get("fields", {}).get("surname", ""),
-        "BIRTHDATE": data.get("fields", {}).get("date_of_birth", ""),
-        "UF_CRM_PASSPORT_HASH": passport_hash,
-        "UF_CRM_PASSPORT_DOC_URL": data.get("presigned_url", ""),
-        "UF_CRM_CORRELATION_ID": correlation_id,
-        "UF_CRM_OCR_SOURCE": data.get("parsing_source", "MRZ_local"),
-        "UF_CRM_CONFIDENCE": str(data.get("confidence_score", 0.0)),
-        "SOURCE_ID": "TELEGRAM_BOT",
+    resident_entry = {
+        "surname": fields.get("surname", ""),
+        "given_names": fields.get("given_names", ""),
+        "date_of_birth": fields.get("date_of_birth", ""),
+        "nationality": fields.get("nationality", ""),
+        "passport_number": fields.get("passport_number", ""),
+        "passport_hash": passport_hash,
+        "presigned_url": presigned_url,
+        "confidence_score": float(ocr_result.get("confidence_score", 0.0)),
+        "parsing_source": ocr_result.get("parsing_source", "MRZ_local"),
+        "auto_accepted": bool(ocr_result.get("auto_accepted", False)),
+        "correlation_id": correlation_id,
+        "confirmed": False,
     }
 
-    lead_id = await create_bitrix_lead(bitrix_payload, correlation_id)
-    if not lead_id:
-        await callback.message.answer("Не удалось создать заявку. Попробуйте позже.")
-        await state.clear()
+    residents = data.get("residents", [])
+    current_index = int(data.get("current_resident_index", 0))
+    if len(residents) <= current_index:
+        residents.append(resident_entry)
+    else:
+        residents[current_index] = resident_entry
+
+    await state.update_data(residents=residents, retry_count=0)
+    await state.set_state(PassportFlow.waiting_passport_confirm)
+
+    preview = (
+        "Распознанные данные:\n"
+        f"Фамилия: {resident_entry.get('surname', '')}\n"
+        f"Имя: {resident_entry.get('given_names', '')}\n"
+        f"Дата рождения: {resident_entry.get('date_of_birth', '')}\n"
+        f"Гражданство: {resident_entry.get('nationality', '')}"
+    )
+
+    low_confidence = resident_entry["confidence_score"] < 0.80
+    if low_confidence:
+        preview += "\n\n⚠️ Низкое качество распознавания. Проверьте данные."
+
+    await message.answer(preview, reply_markup=passport_confirm_keyboard(low_confidence))
+
+
+async def on_confirm_passport(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    action = callback.data or ""
+    data = await state.get_data()
+    residents = data.get("residents", [])
+    current_index = int(data.get("current_resident_index", 0))
+    resident_count = int(data.get("resident_count", 1))
+
+    if action == "retake_passport":
+        await state.update_data(retry_count=0)
+        await ask_passport_photo(callback.message, state)
         return
 
-    await create_bitrix_deal(lead_id, correlation_id)
-    await callback.message.answer("Спасибо! Данные подтверждены и отправлены.")
+    if current_index >= len(residents):
+        await callback.message.answer("Сессия устарела. Пожалуйста, начните заново командой /start.")
+        return
+
+    residents[current_index]["confirmed"] = True
+    current_index += 1
+    await state.update_data(residents=residents, current_resident_index=current_index, retry_count=0)
+
+    if current_index < resident_count:
+        await ask_passport_photo(callback.message, state)
+        return
+
+    await state.set_state(PassportFlow.waiting_final_confirm)
+    await send_final_summary(callback.message, state)
+
+
+async def on_edit_passport(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer("Исправление данных будет доступно в следующей версии. Нажмите Переснять.")
+
+
+async def on_final_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    residents = data.get("residents", [])
+    resident_count = int(data.get("resident_count", 0))
+
+    for resident in residents:
+        resident_hash = resident.get("passport_hash", "")
+        if resident_hash and await is_duplicate_hash(bot, resident_hash):
+            await callback.message.answer("Этот документ уже зарегистрирован")
+            return
+
+    lead_ids: list[int] = []
+    manager_code = data.get("manager_code", "")
+    district = data.get("district", "")
+    address = data.get("address", "")
+    move_date = data.get("move_date", "")
+    phone = data.get("phone", "")
+
+    for idx, resident in enumerate(residents):
+        correlation_id = resident.get("correlation_id", str(uuid.uuid4()))
+        payload = {
+            "NAME": resident.get("given_names", ""),
+            "LAST_NAME": resident.get("surname", ""),
+            "BIRTHDATE": resident.get("date_of_birth", ""),
+            "UF_CRM_PASSPORT_HASH": resident.get("passport_hash", ""),
+            "UF_CRM_PASSPORT_DOC_URL": resident.get("presigned_url", ""),
+            "UF_CRM_CORRELATION_ID": correlation_id,
+            "UF_CRM_OCR_SOURCE": resident.get("parsing_source", "MRZ_local"),
+            "UF_CRM_CONFIDENCE": str(resident.get("confidence_score", 0.0)),
+            "SOURCE_ID": "TELEGRAM_BOT",
+            "UF_CRM_MANAGER_CODE": manager_code,
+            "UF_CRM_DISTRICT": district,
+            "UF_CRM_ADDRESS": address,
+            "UF_CRM_MOVE_DATE": move_date,
+            "UF_CRM_PHONE": phone,
+            "UF_CRM_RESIDENT_INDEX": str(idx + 1),
+            "UF_CRM_TOTAL_RESIDENTS": str(resident_count),
+            "UF_CRM_MANAGER_CHECK_REQUIRED": "YES",
+        }
+        lead_id = await create_bitrix_lead(payload, correlation_id)
+        if not lead_id:
+            await callback.message.answer("❌ Ошибка отправки. Попробуйте позже.")
+            return
+        lead_ids.append(lead_id)
+
+    first_correlation = residents[0].get("correlation_id", str(uuid.uuid4())) if residents else str(uuid.uuid4())
+    deal_payload = {
+        "TITLE": f"Telegram Lead {lead_ids[0]}",
+        "LEAD_ID": lead_ids[0],
+        "STAGE_ID": "DOCS_PENDING",
+        "UF_CRM_TOTAL_RESIDENTS": str(resident_count),
+        "UF_CRM_MANAGER_CODE": manager_code,
+    }
+    deal_response = await bitrix_post("crm.deal.add", {"fields": deal_payload}, first_correlation)
+    deal_id = int(deal_response.get("result")) if deal_response and deal_response.get("result") else None
+    if not deal_id:
+        await callback.message.answer("❌ Ошибка отправки. Попробуйте позже.")
+        return
+
+    for resident in residents:
+        resident_hash = resident.get("passport_hash", "")
+        if resident_hash:
+            await remember_hash(bot, resident_hash)
+
+    await callback.message.answer("✅ Данные отправлены! Менеджер свяжется с вами.")
     await state.clear()
 
 
+async def on_restart(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await ask_manager_code(callback.message, state)
+
+
+async def wrong_input_photo_expected(message: Message) -> None:
+    await message.answer("Пожалуйста, отправьте фото паспорта.")
+
+
+async def wrong_input_text_expected(message: Message) -> None:
+    await message.answer("Пожалуйста, введите текст, а не фото.")
+
+
+async def on_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+
+
 async def on_confirm_stale(callback: CallbackQuery) -> None:
-    """Handle 'all_correct' press outside of valid FSM state (stale message)."""
-    await callback.answer(
-        "Эта кнопка уже неактуальна. Отправьте новое фото паспорта.",
-        show_alert=True,
-    )
+    await callback.answer()
 
 
 async def upload_to_s3(image_bytes: bytes, correlation_id: str, passport_hash: str) -> str:
@@ -263,7 +589,37 @@ async def main() -> None:
     dp = Dispatcher(storage=storage)
 
     dp.message.register(cmd_start, CommandStart())
-    dp.message.register(handle_photo, F.photo)
+    dp.message.register(handle_manager_code, PassportFlow.waiting_manager_code)
+    dp.message.register(handle_address, PassportFlow.waiting_address)
+    dp.message.register(handle_district_text, PassportFlow.waiting_district_text)
+    dp.message.register(handle_resident_count_text, PassportFlow.waiting_resident_count_text)
+    dp.message.register(handle_move_date, PassportFlow.waiting_move_date)
+    dp.message.register(handle_phone, PassportFlow.waiting_phone)
+    dp.message.register(handle_passport_photo, PassportFlow.waiting_passport_photo, F.photo)
+    dp.message.register(wrong_input_photo_expected, PassportFlow.waiting_passport_photo)
+
+    dp.message.register(
+        wrong_input_text_expected,
+        F.photo,
+        PassportFlow.waiting_manager_code,
+        PassportFlow.waiting_district_text,
+        PassportFlow.waiting_address,
+        PassportFlow.waiting_resident_count_text,
+        PassportFlow.waiting_move_date,
+        PassportFlow.waiting_phone,
+    )
+
+    dp.callback_query.register(handle_district_select, F.data.startswith("district_"))
+    dp.callback_query.register(handle_count_select, F.data.startswith("count_"))
+    dp.callback_query.register(
+        on_confirm_passport,
+        F.data.in_({"all_correct_passport", "retake_passport"}),
+        PassportFlow.waiting_passport_confirm,
+    )
+    dp.callback_query.register(on_edit_passport, F.data == "edit_passport", PassportFlow.waiting_passport_confirm)
+    dp.callback_query.register(on_final_confirm, F.data == "final_confirm", PassportFlow.waiting_final_answer)
+    dp.callback_query.register(on_restart, F.data == "restart")
+
     dp.callback_query.register(on_confirm, F.data == "all_correct", PassportFlow.waiting_confirmation)
     dp.callback_query.register(on_confirm_stale, F.data == "all_correct")
 

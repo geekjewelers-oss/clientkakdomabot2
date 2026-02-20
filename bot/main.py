@@ -102,6 +102,12 @@ async def handle_photo(message: Message, bot: Bot, state: FSMContext) -> None:
 
 async def on_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
+    if not data:
+        await callback.message.answer("Сессия устарела. Пожалуйста, отправьте фото паспорта заново.")
+        await state.clear()
+        await callback.answer()
+        return
+
     correlation_id = data.get("correlation_id", str(uuid.uuid4()))
     passport_hash = data.get("passport_hash", "")
 
@@ -139,6 +145,14 @@ async def on_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
     await create_bitrix_deal(lead_id, correlation_id)
     await callback.message.answer("Спасибо! Данные подтверждены и отправлены.")
     await state.clear()
+
+
+async def on_confirm_stale(callback: CallbackQuery) -> None:
+    """Handle 'all_correct' press outside of valid FSM state (stale message)."""
+    await callback.answer(
+        "Эта кнопка уже неактуальна. Отправьте новое фото паспорта.",
+        show_alert=True,
+    )
 
 
 async def upload_to_s3(image_bytes: bytes, correlation_id: str, passport_hash: str) -> str:
@@ -250,7 +264,8 @@ async def main() -> None:
 
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(handle_photo, F.photo)
-    dp.callback_query.register(on_confirm, F.data == "all_correct")
+    dp.callback_query.register(on_confirm, F.data == "all_correct", PassportFlow.waiting_confirmation)
+    dp.callback_query.register(on_confirm_stale, F.data == "all_correct")
 
     try:
         await dp.start_polling(bot)

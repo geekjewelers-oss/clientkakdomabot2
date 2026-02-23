@@ -18,7 +18,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 from redis.asyncio import Redis
 
-from mrz_parser import run_ocr_pipeline
+from ocr_orchestrator import run_ocr_pipeline_v2
 
 load_dotenv()
 
@@ -298,7 +298,7 @@ async def handle_passport_photo(message: Message, bot: Bot, state: FSMContext) -
         await message.answer("Не удалось обработать фото. Попробуйте ещё раз.")
         return
 
-    ocr_result = await run_ocr_pipeline(image_bytes=image_bytes, correlation_id=correlation_id)
+    ocr_result = await run_ocr_pipeline_v2(image_bytes=image_bytes, correlation_id=correlation_id)
     fields = ocr_result.get("fields", {})
 
     if not fields:

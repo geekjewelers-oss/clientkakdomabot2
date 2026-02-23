@@ -1,5 +1,7 @@
 import logging
 import time
+import uuid
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 
@@ -8,12 +10,80 @@ import numpy as np
 
 import config
 from bot import metrics
-from bot.mrz_parser import compute_mrz_hash, extract_mrz_from_image_bytes, extract_text_from_image_bytes, parse_td3_mrz
-from bot.ocr_fallback import easyocr_extract_text
+from bot.mrz_parser import (
+    compute_mrz_hash,
+    extract_mrz_from_image_bytes,
+    extract_text_from_image_bytes,
+    find_mrz_from_text,
+    parse_td3_mrz,
+)
+from bot.ocr_deepseek import deepseek_vision_extract
+from bot.ocr_fallback import extract_text_with_preprocessing
+from bot.ocr_fallback_easyocr import easyocr_extract_text
 from bot.ocr_quality import blur_score, build_ocr_quality_report, exposure_score
 from bot.vision_fallback import yandex_vision_extract_text
 
 logger = logging.getLogger(__name__)
+
+
+def _empty_pipeline_result(correlation_id: str) -> dict[str, Any]:
+    return {
+        "fields": {},
+        "confidence_score": 0.0,
+        "parsing_source": "MRZ_local_v2",
+        "auto_accepted": False,
+        "sla_breach": False,
+        "correlation_id": correlation_id,
+    }
+
+
+def _build_v2_result_from_text(text: str, correlation_id: str, source: str) -> dict[str, Any]:
+    line1, line2 = find_mrz_from_text(text or "")
+    result = _empty_pipeline_result(correlation_id)
+    result["parsing_source"] = source
+
+    if not line1 or not line2:
+        return result
+
+    fields = parse_td3_mrz(line1, line2)
+    confidence = float(fields.get("mrz_confidence_score", 0.0))
+    result["fields"] = fields
+    result["confidence_score"] = confidence
+    result["auto_accepted"] = confidence >= 0.80
+    return result
+
+
+async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = None) -> dict[str, Any]:
+    corr = correlation_id or str(uuid.uuid4())
+
+    pytesseract_text = await asyncio.to_thread(extract_text_with_preprocessing, image_bytes)
+    pytesseract_result = _build_v2_result_from_text(pytesseract_text, corr, source="pytesseract_opencv")
+    logger.info("[OCR_V2] provider=pytesseract_opencv confidence=%.2f", pytesseract_result["confidence_score"])
+    if float(pytesseract_result.get("confidence_score", 0.0)) >= 0.7:
+        return pytesseract_result
+
+    fallback_mode = (config.OCR_FALLBACK_MODE or "deepseek").strip().lower()
+
+    if fallback_mode == "easyocr":
+        easy_text = await asyncio.to_thread(easyocr_extract_text, image_bytes)
+        easy_result = _build_v2_result_from_text(easy_text, corr, source="easyocr")
+        logger.info("[OCR_V2] provider=easyocr confidence=%.2f", easy_result["confidence_score"])
+        return easy_result
+
+    deepseek_data = await asyncio.to_thread(deepseek_vision_extract, image_bytes)
+    deepseek_result = _empty_pipeline_result(corr)
+    deepseek_result["parsing_source"] = "deepseek"
+    deepseek_result["fields"] = {
+        "surname": deepseek_data.get("surname", ""),
+        "given_names": deepseek_data.get("given_names", ""),
+        "passport_number": deepseek_data.get("passport_number", ""),
+        "nationality": deepseek_data.get("nationality", ""),
+        "date_of_birth": deepseek_data.get("birth_date", ""),
+    }
+    deepseek_result["confidence_score"] = float(deepseek_data.get("confidence_score", 0.0))
+    deepseek_result["auto_accepted"] = deepseek_result["confidence_score"] >= 0.80
+    logger.info("[OCR_V2] provider=deepseek confidence=%.2f", deepseek_result["confidence_score"])
+    return deepseek_result
 
 
 def _decode_gray_image(img_bytes: bytes) -> np.ndarray | None:

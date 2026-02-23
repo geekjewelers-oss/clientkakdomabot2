@@ -2,7 +2,7 @@ aiogram[redis]
 python-dotenv
 pytesseract
 Pillow
-opencv-python
+opencv-python-headless
 numpy
 requests
 boto3

@@ -13,7 +13,6 @@ from typing import Any
 
 import boto3
 import cv2
-import easyocr
 import numpy as np
 import pytesseract
 import requests
@@ -260,13 +259,15 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, Any]:
 # =========================
 # OCR functions
 # =========================
-_reader: easyocr.Reader | None = None
+_reader: Any | None = None
 YANDEX_VISION_ENDPOINT = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
 
 
-def _get_easyocr_reader() -> easyocr.Reader:
+def _get_easyocr_reader() -> Any:
     global _reader
     if _reader is None:
+        import easyocr
+
         _reader = easyocr.Reader(["en"])
     return _reader
 

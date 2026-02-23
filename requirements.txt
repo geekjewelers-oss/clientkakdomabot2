@@ -5,9 +5,9 @@ Pillow
 opencv-python
 numpy
 requests
-easyocr
-torch
-torchvision
+#easyocr
+#torch
+#torchvision
 fastapi
 httpx
 pydantic>=2

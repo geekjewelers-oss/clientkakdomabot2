@@ -1,35 +1,43 @@
 import io
-import logging
 
-import easyocr
+import cv2
 import numpy as np
+import pytesseract
 from PIL import Image
 
-logger = logging.getLogger(__name__)
 
-_reader = None
+def _deskew(gray: np.ndarray) -> np.ndarray:
+    coords = np.column_stack(np.where(gray < 255))
+    if coords.size == 0:
+        return gray
+
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+
+    (h, w) = gray.shape[:2]
+    center = (w // 2, h // 2)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(gray, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
 
-def _get_reader():
-    global _reader
-    if _reader is None:
-        _reader = easyocr.Reader(["en"])
-    return _reader
-
-
-def easyocr_extract_text(image_bytes):
-    logger.info("fallback started")
-
+def extract_text_with_preprocessing(image_bytes: bytes) -> str:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image_np = np.array(image)
+    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-    reader = _get_reader()
-    result = reader.readtext(image_np)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    deskewed = _deskew(gray)
+    thresholded = cv2.adaptiveThreshold(
+        deskewed,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        2,
+    )
+    denoised = cv2.medianBlur(thresholded, 3)
+    scaled = cv2.resize(denoised, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-    texts = [item[1] for item in result if len(item) > 1 and item[1]]
-    joined_text = " ".join(texts).strip()
-
-    logger.info("number of boxes found: %s", len(result))
-    logger.info("fallback text length: %s", len(joined_text))
-
-    return joined_text
+    return pytesseract.image_to_string(scaled, lang="eng", config="--psm 6").strip()

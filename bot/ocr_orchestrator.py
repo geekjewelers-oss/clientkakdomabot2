@@ -17,7 +17,7 @@ from bot.mrz_parser import (
     find_mrz_from_text,
     parse_td3_mrz,
 )
-from bot.ocr_deepseek import deepseek_vision_extract
+from bot.ocr_gemini import gemini_vision_extract
 from bot.ocr_fallback import extract_text_with_preprocessing
 from bot.ocr_fallback_easyocr import easyocr_extract_text
 from bot.ocr_quality import blur_score, build_ocr_quality_report, exposure_score
@@ -70,7 +70,7 @@ async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = N
         logger.info("[OCR_V2] provider=easyocr confidence=%.2f", easy_result["confidence_score"])
         return easy_result
 
-    deepseek_data = await asyncio.to_thread(deepseek_vision_extract, image_bytes)
+    deepseek_data = await asyncio.to_thread(gemini_vision_extract, image_bytes)
     deepseek_result = _empty_pipeline_result(corr)
     deepseek_result["parsing_source"] = "deepseek"
     deepseek_result["fields"] = {
@@ -82,7 +82,7 @@ async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = N
     }
     deepseek_result["confidence_score"] = float(deepseek_data.get("confidence_score", 0.0))
     deepseek_result["auto_accepted"] = deepseek_result["confidence_score"] >= 0.80
-    logger.info("[OCR_V2] provider=deepseek confidence=%.2f", deepseek_result["confidence_score"])
+    logger.info("[OCR_V2] provider=gemini confidence=%.2f", deepseek_result["confidence_score"])
     return deepseek_result
 
 

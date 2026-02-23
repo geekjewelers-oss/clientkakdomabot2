@@ -1,7 +1,6 @@
 import io
 import logging
 
-import easyocr
 import numpy as np
 from PIL import Image
 
@@ -13,6 +12,7 @@ _reader = None
 def _get_reader():
     global _reader
     if _reader is None:
+        import easyocr
         _reader = easyocr.Reader(["en"])
     return _reader
 

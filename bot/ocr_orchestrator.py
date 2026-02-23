@@ -19,7 +19,6 @@ from bot.mrz_parser import (
 )
 from bot.ocr_gemini import gemini_vision_extract
 from bot.ocr_fallback import extract_text_with_preprocessing
-from bot.ocr_fallback_easyocr import easyocr_extract_text
 from bot.ocr_quality import blur_score, build_ocr_quality_report, exposure_score
 from bot.vision_fallback import yandex_vision_extract_text
 
@@ -65,6 +64,8 @@ async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = N
     fallback_mode = (config.OCR_FALLBACK_MODE or "deepseek").strip().lower()
 
     if fallback_mode == "easyocr":
+        from bot.ocr_fallback_easyocr import easyocr_extract_text
+
         easy_text = await asyncio.to_thread(easyocr_extract_text, image_bytes)
         easy_result = _build_v2_result_from_text(easy_text, corr, source="easyocr")
         logger.info("[OCR_V2] provider=easyocr confidence=%.2f", easy_result["confidence_score"])

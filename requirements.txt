@@ -5,6 +5,7 @@ Pillow
 opencv-python
 numpy
 requests
+boto3
 #easyocr
 #torch
 #torchvision

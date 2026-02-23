@@ -1,0 +1,65 @@
+import base64
+import json
+import logging
+
+import httpx
+
+import config
+
+logger = logging.getLogger(__name__)
+
+_GEMINI_PROMPT = (
+    "You are a passport MRZ reader. Extract MRZ data from this passport image. "
+    "Return ONLY valid JSON with these fields: surname, given_names, "
+    "passport_number, nationality, birth_date, expiry_date, sex, country_code. "
+    "No other text, no markdown, no explanation."
+)
+
+_REQUIRED_FIELDS = [
+    "surname",
+    "given_names",
+    "passport_number",
+    "nationality",
+    "birth_date",
+    "expiry_date",
+    "sex",
+    "country_code",
+]
+
+
+def gemini_vision_extract(image_bytes: bytes) -> dict:
+    if not config.GEMINI_API_KEY:
+        return {**{field: "" for field in _REQUIRED_FIELDS}, "confidence_score": 0.0}
+
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-1.5-flash:generateContent?key={config.GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": _GEMINI_PROMPT},
+                {"inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": encoded,
+                }},
+            ],
+        }],
+    }
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+            body = response.json()
+
+        content = body["candidates"][0]["content"]["parts"][0]["text"]
+        content = content.strip().strip("```json").strip("```").strip()
+        parsed = json.loads(content)
+        result = {field: parsed.get(field, "") for field in _REQUIRED_FIELDS}
+        result["confidence_score"] = 0.95
+        return result
+    except Exception as exc:
+        logger.warning("gemini_vision_extract_failed: %s", exc)
+        return {**{field: "" for field in _REQUIRED_FIELDS}, "confidence_score": 0.0}

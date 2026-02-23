@@ -32,7 +32,8 @@ S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "")
 S3_BUCKET = os.getenv("S3_BUCKET", "")
 USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
 
 SEEN_HASHES_KEY = "seen_hashes"
 SEEN_HASHES_LOCAL: set[str] = set()
@@ -579,8 +580,16 @@ async def main() -> None:
     storage = MemoryStorage()
     redis_client = None
     if USE_REDIS:
-        redis_client = Redis.from_url(REDIS_URL)
-        storage = RedisStorage(redis=redis_client)
+        try:
+            if not UPSTASH_REDIS_REST_URL:
+                raise ValueError("UPSTASH_REDIS_REST_URL is empty")
+            redis_client = Redis.from_url(UPSTASH_REDIS_REST_URL)
+            await redis_client.ping()
+            storage = RedisStorage(redis=redis_client)
+        except Exception as exc:
+            logger.exception("Failed to initialize Redis storage, fallback to MemoryStorage: %s", exc)
+            storage = MemoryStorage()
+            redis_client = None
 
     bot = Bot(token=BOT_TOKEN)
     if redis_client is not None:

@@ -366,6 +366,7 @@ def yandex_vision_extract_text(image_bytes: bytes) -> str:
 
 
 def ocr_pipeline_extract(image_bytes: bytes) -> dict:
+    logger.info("OCR_PIPELINE_CALLED: using Gemini")
     from bot.ocr_gemini import gemini_vision_extract
 
     gemini_data = gemini_vision_extract(image_bytes)

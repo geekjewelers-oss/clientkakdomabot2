@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import re
 
 import httpx
 
@@ -55,7 +56,17 @@ def gemini_vision_extract(image_bytes: bytes) -> dict:
             body = response.json()
 
         content = body["candidates"][0]["content"]["parts"][0]["text"]
-        content = content.strip().strip("```json").strip("```").strip()
+        logger.info("gemini_raw_response: %s", content[:200])
+        # Убираем markdown обёртку разными способами
+        content = content.strip()
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+        # Ищем JSON объект если есть лишний текст
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            content = json_match.group()
         parsed = json.loads(content)
         result = {field: parsed.get(field, "") for field in _REQUIRED_FIELDS}
         result["confidence_score"] = 0.95

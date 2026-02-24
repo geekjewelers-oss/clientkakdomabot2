@@ -303,64 +303,83 @@ def yandex_vision_extract_text(image_bytes: bytes) -> str:
     return extracted_text
 
 
-def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
-    from bot.mrz_parser import parse_td3_mrz
+# РЕЗЕРВНЫЙ OCR (Tesseract + MRZ парсинг) — раскомментировать если нужно
+# def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
+#     from bot.mrz_parser import parse_td3_mrz
+#
+#     line1, line2, mrz_text, _mode = extract_mrz_from_image_bytes(img_bytes)
+#     if line1 and line2:
+#         parsed = parse_td3_mrz(line1, line2)
+#         if parsed.get("_mrz_checksum_ok") is True:
+#             return {
+#                 "text": mrz_text or "",
+#                 "source": "mrz",
+#                 "confidence": "high",
+#                 "parsed": parsed,
+#                 "mrz_lines": (line1, line2),
+#             }
+#
+#         confidence = 0.0
+#         logger.info("[OCR] MRZ checksum failed, fallback to Gemini; confidence=%s", confidence)
+#
+#     text = extract_text_from_image_bytes(img_bytes)
+#     logger.info("[OCR] Tesseract text_len=%s", len(text or ""))
+#
+#     from bot.ocr_gemini import gemini_vision_extract
+#
+#     image_bytes = img_bytes
+#     gemini_data = gemini_vision_extract(image_bytes)
+#     if gemini_data.get("confidence_score", 0) > 0:
+#         return {
+#             "fields": {
+#                 "surname": gemini_data.get("surname", ""),
+#                 "given_names": gemini_data.get("given_names", ""),
+#                 "passport_number": gemini_data.get("passport_number", ""),
+#                 "nationality": gemini_data.get("nationality", ""),
+#                 "date_of_birth": gemini_data.get("birth_date", ""),
+#             },
+#             "confidence_score": gemini_data.get("confidence_score", 0),
+#             "parsing_source": "gemini",
+#             "auto_accepted": True,
+#         }
+#
+#     vision_text = ""
+#     if len((text or "").strip()) < OCR_SKIP_VISION_IF_LEN:
+#         vision_text = yandex_vision_extract_text(img_bytes)
+#
+#     if vision_text:
+#         return {
+#             "text": vision_text,
+#             "source": "vision",
+#             "confidence": "medium",
+#             "parsed": {},
+#             "mrz_lines": None,
+#         }
+#
+#     return {
+#         "text": text or "",
+#         "source": "tesseract",
+#         "confidence": "low",
+#         "parsed": {},
+#         "mrz_lines": None,
+#     }
 
-    line1, line2, mrz_text, _mode = extract_mrz_from_image_bytes(img_bytes)
-    if line1 and line2:
-        parsed = parse_td3_mrz(line1, line2)
-        if parsed.get("_mrz_checksum_ok") is True:
-            return {
-                "text": mrz_text or "",
-                "source": "mrz",
-                "confidence": "high",
-                "parsed": parsed,
-                "mrz_lines": (line1, line2),
-            }
 
-        confidence = 0.0
-        logger.info("[OCR] MRZ checksum failed, fallback to Gemini; confidence=%s", confidence)
-
-    text = extract_text_from_image_bytes(img_bytes)
-    logger.info("[OCR] Tesseract text_len=%s", len(text or ""))
-
+def ocr_pipeline_extract(image_bytes: bytes) -> dict:
     from bot.ocr_gemini import gemini_vision_extract
 
-    image_bytes = img_bytes
     gemini_data = gemini_vision_extract(image_bytes)
-    if gemini_data.get("confidence_score", 0) > 0:
-        return {
-            "fields": {
-                "surname": gemini_data.get("surname", ""),
-                "given_names": gemini_data.get("given_names", ""),
-                "passport_number": gemini_data.get("passport_number", ""),
-                "nationality": gemini_data.get("nationality", ""),
-                "date_of_birth": gemini_data.get("birth_date", ""),
-            },
-            "confidence_score": gemini_data.get("confidence_score", 0),
-            "parsing_source": "gemini",
-            "auto_accepted": True,
-        }
-
-    vision_text = ""
-    if len((text or "").strip()) < OCR_SKIP_VISION_IF_LEN:
-        vision_text = yandex_vision_extract_text(img_bytes)
-
-    if vision_text:
-        return {
-            "text": vision_text,
-            "source": "vision",
-            "confidence": "medium",
-            "parsed": {},
-            "mrz_lines": None,
-        }
-
     return {
-        "text": text or "",
-        "source": "tesseract",
-        "confidence": "low",
-        "parsed": {},
-        "mrz_lines": None,
+        "fields": {
+            "surname": gemini_data.get("surname", ""),
+            "given_names": gemini_data.get("given_names", ""),
+            "passport_number": gemini_data.get("passport_number", ""),
+            "nationality": gemini_data.get("nationality", ""),
+            "date_of_birth": gemini_data.get("birth_date", ""),
+        },
+        "confidence_score": gemini_data.get("confidence_score", 0.0),
+        "parsing_source": "gemini",
+        "auto_accepted": gemini_data.get("confidence_score", 0.0) >= 0.7,
     }
 
 

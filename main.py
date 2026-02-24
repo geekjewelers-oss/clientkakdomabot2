@@ -304,18 +304,22 @@ def yandex_vision_extract_text(image_bytes: bytes) -> str:
 
 
 def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
+    from bot.mrz_parser import parse_td3_mrz
+
     line1, line2, mrz_text, _mode = extract_mrz_from_image_bytes(img_bytes)
     if line1 and line2:
         parsed = parse_td3_mrz(line1, line2)
-        checksum_ok = parsed.get("_mrz_checksum_ok", False)
-        confidence = "high" if checksum_ok else "medium"
-        return {
-            "text": mrz_text or "",
-            "source": "mrz",
-            "confidence": confidence,
-            "parsed": parsed,
-            "mrz_lines": (line1, line2),
-        }
+        if parsed.get("_mrz_checksum_ok") is True:
+            return {
+                "text": mrz_text or "",
+                "source": "mrz",
+                "confidence": "high",
+                "parsed": parsed,
+                "mrz_lines": (line1, line2),
+            }
+
+        confidence = 0.0
+        logger.info("[OCR] MRZ checksum failed, fallback to Gemini; confidence=%s", confidence)
 
     text = extract_text_from_image_bytes(img_bytes)
     logger.info("[OCR] Tesseract text_len=%s", len(text or ""))

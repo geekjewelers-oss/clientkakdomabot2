@@ -259,30 +259,7 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, Any]:
 # =========================
 # OCR functions
 # =========================
-_reader: Any | None = None
 YANDEX_VISION_ENDPOINT = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
-
-
-def _get_easyocr_reader() -> Any:
-    global _reader
-    if _reader is None:
-        import easyocr
-
-        _reader = easyocr.Reader(["en"])
-    return _reader
-
-
-def easyocr_extract_text(image_bytes: bytes) -> str:
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image_np = np.array(image)
-
-    reader = _get_easyocr_reader()
-    result = reader.readtext(image_np)
-    texts = [item[1] for item in result if len(item) > 1 and item[1]]
-    joined_text = " ".join(texts).strip()
-
-    logger.info("[OCR] EasyOCR boxes=%s text_len=%s", len(result), len(joined_text))
-    return joined_text
 
 
 def yandex_vision_extract_text(image_bytes: bytes) -> str:
@@ -343,18 +320,26 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
     text = extract_text_from_image_bytes(img_bytes)
     logger.info("[OCR] Tesseract text_len=%s", len(text or ""))
 
-    easy_text = easyocr_extract_text(img_bytes)
-    if easy_text and len(easy_text) > OCR_MIN_EASYOCR_LEN:
+    from bot.ocr_gemini import gemini_vision_extract
+
+    image_bytes = img_bytes
+    gemini_data = gemini_vision_extract(image_bytes)
+    if gemini_data.get("confidence_score", 0) > 0:
         return {
-            "text": easy_text,
-            "source": "easyocr",
-            "confidence": "medium",
-            "parsed": {},
-            "mrz_lines": None,
+            "fields": {
+                "surname": gemini_data.get("surname", ""),
+                "given_names": gemini_data.get("given_names", ""),
+                "passport_number": gemini_data.get("passport_number", ""),
+                "nationality": gemini_data.get("nationality", ""),
+                "date_of_birth": gemini_data.get("birth_date", ""),
+            },
+            "confidence_score": gemini_data.get("confidence_score", 0),
+            "parsing_source": "gemini",
+            "auto_accepted": True,
         }
 
     vision_text = ""
-    if len((easy_text or text).strip()) < OCR_SKIP_VISION_IF_LEN:
+    if len((text or "").strip()) < OCR_SKIP_VISION_IF_LEN:
         vision_text = yandex_vision_extract_text(img_bytes)
 
     if vision_text:
@@ -367,7 +352,7 @@ def ocr_pipeline_extract(img_bytes: bytes) -> dict[str, Any]:
         }
 
     return {
-        "text": easy_text or text or "",
+        "text": text or "",
         "source": "tesseract",
         "confidence": "low",
         "parsed": {},

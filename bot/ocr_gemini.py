@@ -30,6 +30,7 @@ _REQUIRED_FIELDS = [
 
 def gemini_vision_extract(image_bytes: bytes) -> dict:
     logger.info("GEMINI_CALLED: starting vision extract")
+    logger.info("GEMINI_KEY_SET: %s", bool(config.GEMINI_API_KEY))
     if not config.GEMINI_API_KEY:
         return {**{field: "" for field in _REQUIRED_FIELDS}, "confidence_score": 0.0}
 
@@ -73,5 +74,5 @@ def gemini_vision_extract(image_bytes: bytes) -> dict:
         result["confidence_score"] = 0.95
         return result
     except Exception as exc:
-        logger.warning("gemini_vision_extract_failed: %s", exc)
+        logger.warning("gemini_vision_extract_failed: %s", exc, exc_info=True)
         return {**{field: "" for field in _REQUIRED_FIELDS}, "confidence_score": 0.0}

@@ -37,7 +37,7 @@ def gemini_vision_extract(image_bytes: bytes) -> dict:
     encoded = base64.b64encode(image_bytes).decode("utf-8")
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={config.GEMINI_API_KEY}"
+        f"gemini-2.0-flash:generateContent?key={config.GEMINI_API_KEY}"
     )
     payload = {
         "contents": [{

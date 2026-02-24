@@ -39,6 +39,7 @@ def gemini_vision_extract(image_bytes: bytes) -> dict:
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"gemini-2.0-flash:generateContent?key={config.GEMINI_API_KEY}"
     )
+    logger.info("GEMINI_URL: %s", url.split("?")[0])
     payload = {
         "contents": [{
             "parts": [

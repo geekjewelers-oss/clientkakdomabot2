@@ -1,2 +1,0 @@
-[phases.setup]
-nixPkgs = ["tesseract4", "tesseract4.langs.eng"]

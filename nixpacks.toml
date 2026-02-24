@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["tesseract", "libxcb"]
+nixPkgs = ["tesseract4", "tesseract4.langs.eng"]

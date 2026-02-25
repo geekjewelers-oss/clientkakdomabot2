@@ -42,13 +42,14 @@ UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 USE_REDIS = _bool_env("USE_REDIS", False)
 
-YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY")
-YANDEX_VISION_FOLDER_ID = os.getenv("YANDEX_VISION_FOLDER_ID")
+YANDEX_VISION_API_KEY = os.getenv("YANDEX_VISION_API_KEY")  # deprecated, используется только как последний fallback
+YANDEX_VISION_FOLDER_ID = os.getenv("YANDEX_VISION_FOLDER_ID")  # deprecated, используется только как последний fallback
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OCR_FALLBACK_MODE = os.getenv("OCR_FALLBACK_MODE", "deepseek")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # deprecated, используется только как последний fallback
 OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "")
+AZAPI_API_KEY = os.getenv("AZAPI_API_KEY", "")
 OCR_FALLBACK_ENABLED = _bool_env("OCR_FALLBACK_ENABLED", True)
+AZAPI_ENABLED = _bool_env("AZAPI_ENABLED", True)
 PADDLE_LANG = os.getenv("PADDLE_LANG", "multilingual")
 MIN_CONFIDENCE = _float_env("MIN_CONFIDENCE", 0.85)
 

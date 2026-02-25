@@ -18,7 +18,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 from redis.asyncio import Redis
 
-from ocr_orchestrator import run_ocr_pipeline_v2
+from ocr_service.pipeline import run_ocr_pipeline_v2
 
 load_dotenv()
 

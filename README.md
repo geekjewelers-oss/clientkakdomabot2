@@ -151,3 +151,127 @@ contact_id = await connector.create_contact(
     )
 )
 ```
+
+## Деплой на Oracle Cloud Free Tier (Always Free ARM 4 OCPU / 24 GB)
+
+Ниже — практический production-сценарий для ARM-инстанса Oracle Cloud (Ampere A1).
+
+### 1) Создание VM
+
+1. Oracle Cloud Console → **Compute** → **Instances** → **Create instance**.
+2. Shape: **VM.Standard.A1.Flex**.
+3. Выставить ресурсы (Always Free максимум):
+   - `4 OCPU`
+   - `24 GB RAM`
+4. Image: Ubuntu 22.04/24.04 ARM.
+5. Открыть ingress порты в Security List / NSG:
+   - `22` (SSH)
+   - `80` (HTTP)
+   - `443` (HTTPS)
+   - при прямом запуске API: `8000` (опционально)
+
+### 2) Базовая подготовка сервера
+
+```bash
+sudo apt-get update && sudo apt-get upgrade -y
+sudo apt-get install -y ca-certificates curl git ufw
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw --force enable
+```
+
+### 3) Установка Docker + Buildx (multi-arch)
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+newgrp docker
+
+docker version
+docker buildx create --name multiarch --use || docker buildx use multiarch
+docker buildx inspect --bootstrap
+```
+
+### 4) Клонирование и env
+
+```bash
+git clone <YOUR_REPO_URL> app
+cd app
+cp .env.example .env
+nano .env
+```
+
+Минимальные переменные для новой fallback-цепочки:
+
+```env
+OCR_FALLBACK_ENABLED=true
+OCR_SPACE_API_KEY=...
+AZAPI_API_KEY=...
+AZAPI_ENABLED=true
+YANDEX_VISION_API_KEY=...  # последний fallback
+YANDEX_VISION_FOLDER_ID=... # последний fallback
+MIN_CONFIDENCE=0.85
+```
+
+### 5) Сборка образа для ARM
+
+На ARM-инстансе можно собирать нативно:
+
+```bash
+docker build -t clientkakdomabot:prod .
+```
+
+Или multi-arch образ для registry:
+
+```bash
+docker buildx build \
+  --platform linux/arm64,linux/amd64 \
+  -t <registry>/clientkakdomabot:prod \
+  --push .
+```
+
+### 6) Запуск контейнера
+
+```bash
+docker run -d \
+  --name clientkakdomabot \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 8000:8000 \
+  clientkakdomabot:prod
+```
+
+Если используете Telegram polling-only режим без внешнего API, порт можно не публиковать.
+
+### 7) Health-check и логи
+
+```bash
+docker ps
+docker logs -f clientkakdomabot
+```
+
+Для OCR API (если поднят FastAPI):
+
+```bash
+curl -f http://127.0.0.1:8000/health || true
+```
+
+### 8) Рекомендуемый production hardening
+
+- Использовать reverse-proxy (Nginx/Caddy) + TLS (Let's Encrypt).
+- Ограничить доступ к порту приложения только через localhost + proxy.
+- Хранить `.env` только на сервере, не коммитить секреты.
+- Включить ротацию логов Docker.
+- Настроить мониторинг контейнера (CPU/RAM/restarts).
+- Делать регулярный `docker pull`/`docker build` + rolling restart.
+
+### 9) Проверка fallback-цепочки в runtime
+
+Ожидаемый порядок провайдеров:
+1. `paddle`
+2. `ocr_space`
+3. `azapi`
+4. `yandex_vision`
+
+Если никто не вернул `auto_accepted=true`, итог должен быть `manual_check=true`.

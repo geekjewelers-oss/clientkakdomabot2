@@ -12,7 +12,8 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from .adapters import CRMConnector, FallbackOCRAdapter, LocalOCRAdapter, StorageAdapter
 from .engines import QualityAnalyzer, RetryEngine, SLAEngine
-from .models import JobRecord, JobStatus, OCRResult
+from .models import JobRecord, JobStatus, MRZData, OCRResult
+from .pipeline import run_ocr_pipeline_v2
 from .repository import JobRepository
 from .settings import OCRSettings
 
@@ -49,6 +50,20 @@ class OcrOrchestrator:
         asyncio.create_task(self.process_job(job.job_id))
         return job.job_id
 
+    @staticmethod
+    def _mrz_from_pipeline(payload: dict) -> MRZData:
+        fields = payload.get("fields") or {}
+        return MRZData(
+            surname=fields.get("surname"),
+            given_names=fields.get("given_names"),
+            passport_hash=fields.get("passport_hash"),
+            nationality=fields.get("nationality"),
+            birth_date=(fields.get("date_of_birth") or "").replace("-", ""),
+            checksum_ok="checksum_failed" not in (payload.get("warnings") or []),
+            confidence=float(payload.get("confidence_score") or 0.0),
+            format="TD3",
+        )
+
     async def process_job(self, job_id: str) -> None:
         job = self.repo.get(job_id)
         if not job:
@@ -62,27 +77,25 @@ class OcrOrchestrator:
 
         for _ in range(self.settings.local_attempts):
             job.cycle_count = self.retry.next_cycle(job.cycle_count)
-            local = await self.local_adapter.extract(content, job.correlation_id)
-            mrz = local["mrz"]
-            quality = self.quality.analyze(content=content, confidence=mrz.confidence)
-            decision = self.sla_engine.decide(mrz=mrz, cycle_count=job.cycle_count)
-            self.repo.add_audit(job, "local_attempt", {"cycle_count": job.cycle_count, "decision": decision.status.value})
+            payload = await run_ocr_pipeline_v2(content, job.correlation_id)
+            mrz = self._mrz_from_pipeline(payload)
 
-            if decision.use_fallback:
-                for _ in range(self.settings.fallback_attempts):
-                    fallback = await self.fallback_adapter.extract(content, job.correlation_id)
-                    f_mrz = fallback["mrz"]
-                    f_quality = self.quality.analyze(content=content, confidence=f_mrz.confidence)
-                    decision = self.sla_engine.decide(mrz=f_mrz, cycle_count=job.cycle_count)
-                    self.repo.add_audit(job, "fallback_attempt", {"decision": decision.status.value})
-                    local = fallback
-                    mrz = f_mrz
-                    quality = f_quality
-                    if decision.status != JobStatus.processing:
-                        break
+            quality = self.quality.analyze(content=content, confidence=float(payload.get("confidence_score") or 0.0))
+            decision = self.sla_engine.decide(mrz=mrz, cycle_count=job.cycle_count)
+            self.repo.add_audit(
+                job,
+                "local_attempt",
+                {
+                    "cycle_count": job.cycle_count,
+                    "decision": decision.status.value,
+                    "parsing_source": payload.get("parsing_source"),
+                    "warnings": payload.get("warnings", []),
+                    "manual_check": payload.get("manual_check", True),
+                },
+            )
 
             duplicate = bool(mrz.passport_hash and self.repo.check_duplicate(mrz.passport_hash))
-            result = OCRResult(quality=quality, mrz=mrz, text=local["text"], duplicate_detected=duplicate)
+            result = OCRResult(quality=quality, mrz=mrz, text=payload.get("mrz", ""), duplicate_detected=duplicate)
             job.result = result
 
             if duplicate:
@@ -92,10 +105,16 @@ class OcrOrchestrator:
                 await self._notify_crm(job)
                 return
 
-            if decision.status in {JobStatus.auto_accepted, JobStatus.manual_review}:
-                job.status = decision.status
-                if decision.status == JobStatus.auto_accepted and mrz.passport_hash:
+            if payload.get("auto_accepted"):
+                job.status = JobStatus.auto_accepted
+                if mrz.passport_hash:
                     self.repo.register_passport_hash(mrz.passport_hash, job.job_id)
+                self.repo.update(job)
+                await self._notify_crm(job)
+                return
+
+            if decision.status in {JobStatus.manual_review}:
+                job.status = JobStatus.manual_review
                 self.repo.update(job)
                 await self._notify_crm(job)
                 return

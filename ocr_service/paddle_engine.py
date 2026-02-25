@@ -7,7 +7,7 @@ import numpy as np
 from paddleocr import PaddleOCR
 
 from config import MIN_CONFIDENCE, PADDLE_LANG
-from .preprocess import preprocess_image
+from .preprocess import aggressive_preprocess, light_preprocess
 
 
 @dataclass
@@ -23,7 +23,7 @@ class PaddleEngine:
         self._ocr = PaddleOCR(use_angle_cls=True, lang=self.lang)
 
     def full_page(self, image_bytes: bytes) -> dict[str, object]:
-        processed = preprocess_image(image_bytes)
+        processed = light_preprocess(image_bytes)
         lines = self._run_ocr(processed)
         text = "\n".join(line.text for line in lines)
         return {
@@ -33,14 +33,13 @@ class PaddleEngine:
         }
 
     def mrz_crop(self, image_bytes: bytes) -> dict[str, object]:
-        processed = preprocess_image(image_bytes)
+        processed = aggressive_preprocess(image_bytes)
         h, w = processed.shape[:2]
 
         y_start = int(h * 0.65)
         mrz_region = processed[y_start:h, 0:w]
         lines = self._run_ocr(mrz_region)
 
-        # keep MRZ-like lines only
         mrz_lines = [line for line in lines if self._looks_like_mrz(line.text)]
         text = "\n".join(line.text for line in mrz_lines)
         return {

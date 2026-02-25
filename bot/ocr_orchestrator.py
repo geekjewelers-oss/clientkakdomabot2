@@ -17,7 +17,6 @@ from bot.mrz_parser import (
     find_mrz_from_text,
     parse_td3_mrz,
 )
-from bot.ocr_gemini import gemini_vision_extract
 from bot.ocr_fallback import extract_text_with_preprocessing
 from bot.ocr_quality import blur_score, build_ocr_quality_report, exposure_score
 from bot.vision_fallback import yandex_vision_extract_text
@@ -53,38 +52,10 @@ def _build_v2_result_from_text(text: str, correlation_id: str, source: str) -> d
 
 
 async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = None) -> dict[str, Any]:
-    corr = correlation_id or str(uuid.uuid4())
+    """Deprecated wrapper: uses the production OCR pipeline from ocr_service."""
+    from ocr_service.pipeline import run_ocr_pipeline_v2 as run_pipeline
 
-    pytesseract_text = await asyncio.to_thread(extract_text_with_preprocessing, image_bytes)
-    pytesseract_result = _build_v2_result_from_text(pytesseract_text, corr, source="pytesseract_opencv")
-    logger.info("[OCR_V2] provider=pytesseract_opencv confidence=%.2f", pytesseract_result["confidence_score"])
-    if float(pytesseract_result.get("confidence_score", 0.0)) >= 0.7:
-        return pytesseract_result
-
-    fallback_mode = (config.OCR_FALLBACK_MODE or "deepseek").strip().lower()
-
-    if fallback_mode == "easyocr":
-        from bot.ocr_fallback_easyocr import easyocr_extract_text
-
-        easy_text = await asyncio.to_thread(easyocr_extract_text, image_bytes)
-        easy_result = _build_v2_result_from_text(easy_text, corr, source="easyocr")
-        logger.info("[OCR_V2] provider=easyocr confidence=%.2f", easy_result["confidence_score"])
-        return easy_result
-
-    deepseek_data = await asyncio.to_thread(gemini_vision_extract, image_bytes)
-    deepseek_result = _empty_pipeline_result(corr)
-    deepseek_result["parsing_source"] = "deepseek"
-    deepseek_result["fields"] = {
-        "surname": deepseek_data.get("surname", ""),
-        "given_names": deepseek_data.get("given_names", ""),
-        "passport_number": deepseek_data.get("passport_number", ""),
-        "nationality": deepseek_data.get("nationality", ""),
-        "date_of_birth": deepseek_data.get("birth_date", ""),
-    }
-    deepseek_result["confidence_score"] = float(deepseek_data.get("confidence_score", 0.0))
-    deepseek_result["auto_accepted"] = deepseek_result["confidence_score"] >= 0.80
-    logger.info("[OCR_V2] provider=gemini confidence=%.2f", deepseek_result["confidence_score"])
-    return deepseek_result
+    return await run_pipeline(image_bytes=image_bytes, correlation_id=correlation_id)
 
 
 def _decode_gray_image(img_bytes: bytes) -> np.ndarray | None:
@@ -128,19 +99,8 @@ def _local_ocr_attempt(img_bytes: bytes, gray: np.ndarray | None) -> dict[str, A
     text = extract_text_from_image_bytes(img_bytes)
     logger.info("[OCR] OCR stage: tesseract, text_len=%s", len(text or ""))
 
-    easy_text = easyocr_extract_text(img_bytes)
-    logger.info("[OCR] OCR stage: easyocr, text_len=%s", len(easy_text or ""))
-    if easy_text and len(easy_text) > 40:
-        return _attach_quality({
-            "text": easy_text,
-            "source": "easyocr",
-            "confidence": "medium",
-            "parsed": {},
-            "mrz_lines": None,
-        }, gray)
-
     return _attach_quality({
-        "text": easy_text or text or "",
+        "text": text or "",
         "source": "tesseract",
         "confidence": "low",
         "parsed": {},

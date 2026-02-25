@@ -1,6 +1,5 @@
 aiogram[redis]
 python-dotenv
-pytesseract
 Pillow
 opencv-python-headless
 numpy
@@ -16,3 +15,8 @@ pydantic-settings
 structlog
 pytest
 redis
+paddleocr>=2.9.0
+mrz
+fastmrz
+aiohttp
+python-multipart

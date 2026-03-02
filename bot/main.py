@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from redis.asyncio import Redis
 
 from ocr_service.pipeline import run_ocr_pipeline_v2
+from utils.bitrix_integration import BitrixIntegrationError, create_bitrix_contact_and_deal
 
 load_dotenv()
 
@@ -395,7 +396,6 @@ async def on_final_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot)
     await callback.answer()
     data = await state.get_data()
     residents = data.get("residents", [])
-    resident_count = int(data.get("resident_count", 0))
 
     for resident in residents:
         resident_hash = resident.get("passport_hash", "")
@@ -403,52 +403,15 @@ async def on_final_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot)
             await callback.message.answer("Этот документ уже зарегистрирован")
             return
 
-    lead_ids: list[int] = []
-    manager_code = data.get("manager_code", "")
-    district = data.get("district", "")
-    address = data.get("address", "")
-    move_date = data.get("move_date", "")
-    phone = data.get("phone", "")
-
-    for idx, resident in enumerate(residents):
-        correlation_id = resident.get("correlation_id", str(uuid.uuid4()))
-        payload = {
-            "NAME": resident.get("given_names", ""),
-            "LAST_NAME": resident.get("surname", ""),
-            "BIRTHDATE": resident.get("date_of_birth", ""),
-            "UF_CRM_PASSPORT_HASH": resident.get("passport_hash", ""),
-            "UF_CRM_PASSPORT_DOC_URL": resident.get("presigned_url", ""),
-            "UF_CRM_CORRELATION_ID": correlation_id,
-            "UF_CRM_OCR_SOURCE": resident.get("parsing_source", "MRZ_local"),
-            "UF_CRM_CONFIDENCE": str(resident.get("confidence_score", 0.0)),
-            "SOURCE_ID": "TELEGRAM_BOT",
-            "UF_CRM_MANAGER_CODE": manager_code,
-            "UF_CRM_DISTRICT": district,
-            "UF_CRM_ADDRESS": address,
-            "UF_CRM_MOVE_DATE": move_date,
-            "UF_CRM_PHONE": phone,
-            "UF_CRM_RESIDENT_INDEX": str(idx + 1),
-            "UF_CRM_TOTAL_RESIDENTS": str(resident_count),
-            "UF_CRM_MANAGER_CHECK_REQUIRED": "YES",
-        }
-        lead_id = await create_bitrix_lead(payload, correlation_id)
-        if not lead_id:
-            await callback.message.answer("❌ Ошибка отправки. Попробуйте позже.")
-            return
-        lead_ids.append(lead_id)
-
-    first_correlation = residents[0].get("correlation_id", str(uuid.uuid4())) if residents else str(uuid.uuid4())
-    deal_payload = {
-        "TITLE": f"Telegram Lead {lead_ids[0]}",
-        "LEAD_ID": lead_ids[0],
-        "STAGE_ID": "DOCS_PENDING",
-        "UF_CRM_TOTAL_RESIDENTS": str(resident_count),
-        "UF_CRM_MANAGER_CODE": manager_code,
-    }
-    deal_response = await bitrix_post("crm.deal.add", {"fields": deal_payload}, first_correlation)
-    deal_id = int(deal_response.get("result")) if deal_response and deal_response.get("result") else None
-    if not deal_id:
-        await callback.message.answer("❌ Ошибка отправки. Попробуйте позже.")
+    try:
+        await create_bitrix_contact_and_deal(data)
+    except BitrixIntegrationError as exc:
+        logger.exception("Bitrix integration failed: %s", exc)
+        await callback.message.answer("❌ Ошибка отправки в Bitrix24. Попробуйте позже.")
+        return
+    except Exception as exc:
+        logger.exception("Unexpected Bitrix integration error: %s", exc)
+        await callback.message.answer("❌ Временная ошибка интеграции. Попробуйте позже.")
         return
 
     for resident in residents:

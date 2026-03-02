@@ -33,6 +33,8 @@ def _bool_env(name: str, default: bool) -> bool:
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
+BITRIX_API_URL = os.getenv("BITRIX_API_URL")
+BITRIX_API_KEY = os.getenv("BITRIX_API_KEY")
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")

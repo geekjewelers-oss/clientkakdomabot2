@@ -2,11 +2,11 @@ import os
 import requests
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения из файла .env
 load_dotenv()
 
 DIRECTUS_URL = os.getenv("DIRECTUS_URL")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
-
 
 # === АРХИТЕКТУРА БД: КОЛЛЕКЦИИ, ПОЛЯ, СВЯЗИ И ФЛАГИ КОНТРОЛЯ ===
 SCHEMA = {
@@ -56,7 +56,6 @@ SCHEMA = {
                 "type": "integer",
                 "meta": {"note": "Процент уверенности распознавания (0-100)"},
             },
-            # Флаги контроля OCR:
             {
                 "field": "needs_manual_review",
                 "type": "boolean",
@@ -98,7 +97,6 @@ SCHEMA = {
                 },
             },
             {"field": "rent_amount", "type": "integer"},
-            # === ФЛАГИ КОНТРОЛЯ МЕНЕДЖЕРА (Блокираторы стадий) ===
             {
                 "field": "check_passport_valid",
                 "type": "boolean",
@@ -119,7 +117,6 @@ SCHEMA = {
                 "type": "boolean",
                 "meta": {"note": "Оплата поступила на счет"},
             },
-            # Файлы
             {"field": "contract_pdf_url", "type": "string"},
         ],
     },
@@ -127,6 +124,7 @@ SCHEMA = {
 
 
 def _validate_settings() -> None:
+    """Проверка наличия необходимых настроек в окружении."""
     missing_vars = []
     if not DIRECTUS_URL:
         missing_vars.append("DIRECTUS_URL")
@@ -137,7 +135,7 @@ def _validate_settings() -> None:
         vars_list = ", ".join(missing_vars)
         raise RuntimeError(
             f"Не заданы обязательные переменные окружения: {vars_list}. "
-            "Добавьте их в локальный .env или экспортируйте в окружение перед запуском."
+            "Добавьте их в локальный .env или экспортируйте перед запуском."
         )
 
 
@@ -151,7 +149,7 @@ def create_schema():
     print("🚀 Начинаем развертывание CRM-архитектуры в Directus...")
 
     for collection, data in SCHEMA.items():
-        # 1. Пытаемся создать коллекцию
+        # 1. Создаем коллекцию
         payload = {"collection": collection, "meta": data.get("meta", {}), "schema": {}}
         payload["fields"] = [
             {
@@ -171,40 +169,6 @@ def create_schema():
         else:
             print(f"⚠️ Ошибка создания '{collection}': {res.text}")
 
-        # 2. Создаем поля для коллекции
+        # 2. Создаем поля
         for field in data.get("fields", []):
-            field_payload = {"field": field["field"], "type": field["type"]}
-            if "meta" in field:
-                field_payload["meta"] = field["meta"]
-
-            res_field = requests.post(
-                f"{DIRECTUS_URL}/fields/{collection}", headers=headers, json=field_payload
-            )
-
-            if res_field.status_code in [200, 204]:
-                print(f"   ➕ Поле '{field['field']}' добавлено.")
-            elif res_field.status_code == 400 and "already exists" in res_field.text:
-                pass  # Поле уже есть, молча пропускаем
-            else:
-                print(f"   ⚠️ Ошибка поля '{field['field']}': {res_field.text}")
-
-            # 3. Настраиваем связи (Relations)
-            if "relation" in field:
-                rel_payload = {
-                    "collection": collection,
-                    "field": field["field"],
-                    "related_collection": field["relation"],
-                }
-                res_rel = requests.post(
-                    f"{DIRECTUS_URL}/relations", headers=headers, json=rel_payload
-                )
-                if res_rel.status_code in [200, 204]:
-                    print(
-                        f"   🔗 Создана связь: {collection}.{field['field']} -> {field['relation']}"
-                    )
-
-    print("🎉 Развертывание завершено!")
-
-
-if __name__ == "__main__":
-    create_schema()
+            field_

@@ -11,24 +11,13 @@ from aiogram import F, Router
 import config
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 
 from bot import metrics
 from bot.fsm.states import Form
 from bot.keyboards.registration_kb import (
-    ADD_ANOTHER_NO_TEXT,
-    ADD_ANOTHER_YES_TEXT,
-    BACK_TEXT,
-    BAD_PHOTO_TEXT,
-    CANCEL_TEXT,
-    CONFIRM_TEXT,
     DISTRICTS,
-    EDIT_ADDRESS_TEXT,
-    GLOBAL_CANCEL_TEXT,
     MANAGERS,
-    NO_TEXT,
-    RETRY_PASSPORT_TEXT,
-    YES_TEXT,
     add_another_keyboard,
     back_kb,
     bad_photo_kb,
@@ -137,7 +126,7 @@ async def _go_to_step(
     *,
     next_state: Any,
     text: str,
-    keyboard: ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
+    keyboard: InlineKeyboardMarkup | ReplyKeyboardRemove | None = None,
     log_step: str,
 ) -> None:
     await state.set_state(next_state)
@@ -160,22 +149,28 @@ async def start_registration(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(F.text == GLOBAL_CANCEL_TEXT)
-async def process_global_cancel(message: Message, state: FSMContext) -> None:
+@router.callback_query(F.data == "action:cancel_registration")
+async def process_global_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
     await state.clear()
     logger.info("REGISTRATION_CANCELLED")
-    await message.answer("Регистрация отменена", reply_markup=ReplyKeyboardRemove())
-    await start_registration(message, state)
+    if callback.message is None:
+        return
+    await callback.message.answer("Регистрация отменена", reply_markup=ReplyKeyboardRemove())
+    await start_registration(callback.message, state)
 
 
-@router.message(Form.ask_district, F.text == BACK_TEXT)
-async def back_from_ask_district(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.ask_district, F.data == "action:back")
+async def back_from_ask_district(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     session["district"] = None
     await state.update_data(session=session)
     logger.info("FSM_BACK_STEP from=ask_district to=choosing_manager")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.choosing_manager,
         text="Выберите менеджера:",
@@ -184,14 +179,17 @@ async def back_from_ask_district(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.ask_address, F.text == BACK_TEXT)
-async def back_from_ask_address(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.ask_address, F.data == "action:back")
+async def back_from_ask_address(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     session["address"] = None
     await state.update_data(session=session)
     logger.info("FSM_BACK_STEP from=ask_address to=ask_district")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_district,
         text="Укажите район объекта:",
@@ -200,8 +198,11 @@ async def back_from_ask_address(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.ask_num_people, F.text == BACK_TEXT)
-async def back_from_ask_num_people(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.ask_num_people, F.data == "action:back")
+async def back_from_ask_num_people(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     session["num_people_expected"] = 0
     session["current_passport_index"] = 1
@@ -209,7 +210,7 @@ async def back_from_ask_num_people(message: Message, state: FSMContext) -> None:
     await state.update_data(session=session)
     logger.info("FSM_BACK_STEP from=ask_num_people to=ask_address")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_address,
         text="Введите полный адрес:",
@@ -218,14 +219,17 @@ async def back_from_ask_num_people(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.ask_contacts, F.text == BACK_TEXT)
-async def back_from_ask_contacts(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.ask_contacts, F.data == "action:back")
+async def back_from_ask_contacts(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     session["phone"] = None
     await state.update_data(session=session)
     logger.info("FSM_BACK_STEP from=ask_contacts to=ask_add_another_passport")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_add_another_passport,
         text="Добавить еще один паспорт?",
@@ -234,14 +238,17 @@ async def back_from_ask_contacts(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.ask_move_in_date, F.text == BACK_TEXT)
-async def back_from_ask_move_in_date(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.ask_move_in_date, F.data == "action:back")
+async def back_from_ask_move_in_date(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     session["move_in_date"] = None
     await state.update_data(session=session)
     logger.info("FSM_BACK_STEP from=ask_move_in_date to=ask_contacts")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_contacts,
         text="Введите контактный телефон:",
@@ -250,14 +257,17 @@ async def back_from_ask_move_in_date(message: Message, state: FSMContext) -> Non
     )
 
 
-@router.message(Form.ask_payment_details, F.text == BACK_TEXT)
-async def back_from_ask_payment_details(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.ask_payment_details, F.data == "action:back")
+async def back_from_ask_payment_details(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     session["payment"] = {}
     await state.update_data(session=session)
     logger.info("FSM_BACK_STEP from=ask_payment_details to=ask_move_in_date")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_move_in_date,
         text="Введите дату заезда в формате YYYY-MM-DD",
@@ -266,15 +276,18 @@ async def back_from_ask_payment_details(message: Message, state: FSMContext) -> 
     )
 
 
-@router.message(Form.confirm_passport_fields, F.text == RETRY_PASSPORT_TEXT)
-async def process_retry_passport(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.confirm_passport_fields, F.data == "passport:rescan")
+async def process_retry_passport(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     session = await _get_session(state)
     passport_index = session.get("current_passport_index", 1)
     session["passports"] = [p for p in session.get("passports", []) if p.get("index") != passport_index]
     await state.update_data(session=session)
     logger.info("PASSPORT_RETRY | passport index=%s", passport_index)
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_passport_photo,
         text=f"Отправьте новое фото для паспорта №{passport_index}.",
@@ -283,10 +296,13 @@ async def process_retry_passport(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.ask_passport_photo, F.text == BAD_PHOTO_TEXT)
-async def process_bad_photo_hint(message: Message) -> None:
+@router.callback_query(Form.ask_passport_photo, F.data == "passport:bad_photo")
+async def process_bad_photo_hint(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     logger.info("BAD_PHOTO_HINT_SHOWN")
-    await message.answer(
+    await callback.message.answer(
         "Подсказка по фото паспорта:\n"
         "• без бликов\n"
         "• весь разворот\n"
@@ -295,11 +311,14 @@ async def process_bad_photo_hint(message: Message) -> None:
     )
 
 
-@router.message(Form.final_confirmation, F.text == EDIT_ADDRESS_TEXT)
-async def process_edit_address(message: Message, state: FSMContext) -> None:
+@router.callback_query(Form.final_confirmation, F.data == "action:edit_address")
+async def process_edit_address(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
     logger.info("FSM_BACK_STEP from=final_confirmation to=ask_address")
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_address,
         text="Введите полный адрес:",
@@ -308,19 +327,22 @@ async def process_edit_address(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.choosing_manager)
-async def process_manager(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if text not in MANAGERS:
-        await message.answer("Выберите менеджера с клавиатуры ниже.", reply_markup=manager_keyboard())
+@router.callback_query(Form.choosing_manager, F.data.startswith("manager:"))
+async def process_manager(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    _, _, manager = (callback.data or "").partition(":")
+    if manager not in MANAGERS:
+        await callback.message.answer("Выберите менеджера с клавиатуры ниже.", reply_markup=manager_keyboard())
         return
 
     session = await _get_session(state)
-    session["manager_id"] = text
+    session["manager_id"] = manager
     await state.update_data(session=session)
 
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_district,
         text="Укажите район объекта:",
@@ -329,15 +351,21 @@ async def process_manager(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.ask_district)
-async def process_district(message: Message, state: FSMContext) -> None:
-    district = (message.text or "").strip()
+@router.callback_query(Form.ask_district, F.data.startswith("district:"))
+async def process_district(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    _, _, district = (callback.data or "").partition(":")
     if not district:
-        await message.answer("Район не должен быть пустым.")
+        await callback.message.answer("Район не должен быть пустым.")
         return
 
     if district not in DISTRICTS:
-        await message.answer("Выберите район из списка или нажмите 'Другой район'.", reply_markup=district_keyboard())
+        await callback.message.answer(
+            "Выберите район из списка или нажмите 'Другой район'.",
+            reply_markup=district_keyboard(),
+        )
         return
 
     session = await _get_session(state)
@@ -345,7 +373,7 @@ async def process_district(message: Message, state: FSMContext) -> None:
     await state.update_data(session=session)
 
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_address,
         text="Введите полный адрес:",
@@ -658,11 +686,17 @@ async def process_manual_input_mode(message: Message, state: FSMContext) -> None
     )
 
 
-@router.message(Form.confirm_passport_fields)
-async def process_passport_confirmation(message: Message, state: FSMContext) -> None:
-    answer = (message.text or "").strip()
-    if answer not in {YES_TEXT, NO_TEXT}:
-        await message.answer("Пожалуйста, выберите Да или Нет.", reply_markup=retry_passport_kb())
+@router.callback_query(
+    Form.confirm_passport_fields,
+    F.data.in_({"passport:ok", "confirm:no"}),
+)
+async def process_passport_confirmation(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    _, _, value = (callback.data or "").partition(":")
+    if value not in {"ok", "no"}:
+        await callback.message.answer("Пожалуйста, выберите Да или Нет.", reply_markup=retry_passport_kb())
         return
 
     session = await _get_session(state)
@@ -671,17 +705,17 @@ async def process_passport_confirmation(message: Message, state: FSMContext) -> 
 
     for passport in passports:
         if passport.get("index") == passport_index:
-            passport["confirmed"] = answer == YES_TEXT
+            passport["confirmed"] = value == "ok"
             break
 
-    logger.info("confirmation result=%s | passport index=%s", answer, passport_index)
+    logger.info("confirmation result=%s | passport index=%s", value, passport_index)
 
     session["passports"] = passports
     await state.update_data(session=session)
 
-    if answer == NO_TEXT:
+    if value == "no":
         await _go_to_step(
-            message,
+            callback.message,
             state,
             next_state=Form.ask_passport_photo,
             text=f"Хорошо, отправьте новое фото для паспорта №{passport_index}.",
@@ -691,7 +725,7 @@ async def process_passport_confirmation(message: Message, state: FSMContext) -> 
         return
 
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_add_another_passport,
         text="Добавить еще один паспорт?",
@@ -700,11 +734,14 @@ async def process_passport_confirmation(message: Message, state: FSMContext) -> 
     )
 
 
-@router.message(Form.ask_add_another_passport)
-async def process_add_another_passport(message: Message, state: FSMContext) -> None:
-    answer = (message.text or "").strip()
-    if answer not in {ADD_ANOTHER_YES_TEXT, ADD_ANOTHER_NO_TEXT}:
-        await message.answer("Выберите вариант на клавиатуре.", reply_markup=add_another_keyboard())
+@router.callback_query(Form.ask_add_another_passport, F.data.startswith("residents:"))
+async def process_add_another_passport(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    _, _, answer = (callback.data or "").partition(":")
+    if answer not in {"add_more", "continue"}:
+        await callback.message.answer("Выберите вариант на клавиатуре.", reply_markup=add_another_keyboard())
         return
 
     session = await _get_session(state)
@@ -712,11 +749,11 @@ async def process_add_another_passport(message: Message, state: FSMContext) -> N
     confirmed_count = sum(1 for p in session.get("passports", []) if p.get("confirmed"))
     expected = session.get("num_people_expected", 0)
 
-    if answer == ADD_ANOTHER_YES_TEXT:
+    if answer == "add_more":
         session["current_passport_index"] = session.get("current_passport_index", 1) + 1
         await state.update_data(session=session)
         await _go_to_step(
-            message,
+            callback.message,
             state,
             next_state=Form.ask_passport_photo,
             text=f"Пришлите фото паспорта №{session['current_passport_index']}.",
@@ -726,14 +763,14 @@ async def process_add_another_passport(message: Message, state: FSMContext) -> N
         return
 
     if confirmed_count < expected:
-        await message.answer(
+        await callback.message.answer(
             f"Подтверждено паспортов: {confirmed_count} из {expected}. Добавьте оставшиеся.",
             reply_markup=add_another_keyboard(),
         )
         return
 
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.ask_contacts,
         text="Введите контактный телефон:",
@@ -812,25 +849,28 @@ async def process_payment_details(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Form.final_confirmation)
-async def process_final_confirmation(message: Message, state: FSMContext) -> None:
-    answer = (message.text or "").strip()
-    if answer not in {CONFIRM_TEXT, CANCEL_TEXT}:
-        await message.answer("Выберите Подтвердить или Отменить.", reply_markup=confirm_keyboard())
+@router.callback_query(Form.final_confirmation, F.data.in_({"action:confirm", "action:cancel"}))
+async def process_final_confirmation(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    _, _, answer = (callback.data or "").partition(":")
+    if answer not in {"confirm", "cancel"}:
+        await callback.message.answer("Выберите Подтвердить или Отменить.", reply_markup=confirm_keyboard())
         return
 
     session = await _get_session(state)
 
-    if answer == CANCEL_TEXT:
+    if answer == "cancel":
         await state.clear()
         logger.info("REGISTRATION_CANCELLED")
-        await message.answer("Регистрация отменена", reply_markup=ReplyKeyboardRemove())
-        await start_registration(message, state)
+        await callback.message.answer("Регистрация отменена", reply_markup=ReplyKeyboardRemove())
+        await start_registration(callback.message, state)
         return
 
     logger.info("confirmation result=%s | flow=%s", answer, session.get("flow"))
     await _go_to_step(
-        message,
+        callback.message,
         state,
         next_state=Form.done,
         text="Спасибо! Регистрация завершена ✅",

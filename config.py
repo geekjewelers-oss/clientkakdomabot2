@@ -49,9 +49,7 @@ YANDEX_VISION_FOLDER_ID = os.getenv("YANDEX_VISION_FOLDER_ID")  # deprecated, и
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # deprecated, используется только как последний fallback
 OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "")
-AZAPI_API_KEY = os.getenv("AZAPI_API_KEY", "")
 OCR_FALLBACK_ENABLED = _bool_env("OCR_FALLBACK_ENABLED", True)
-AZAPI_ENABLED = _bool_env("AZAPI_ENABLED", True)
 PADDLE_LANG = os.getenv("PADDLE_LANG", "multilingual")
 MIN_CONFIDENCE = _float_env("MIN_CONFIDENCE", 0.85)
 

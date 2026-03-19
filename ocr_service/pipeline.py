@@ -145,60 +145,6 @@ async def _run_ocr_space(image_bytes: bytes, correlation_id: str) -> dict[str, A
         return None
 
 
-def _extract_azapi_text(data: dict[str, Any]) -> str:
-    if not isinstance(data, dict):
-        return ""
-    candidate_keys = ["text", "ocr_text", "result", "raw_text", "full_text"]
-    for key in candidate_keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value
-    nested = data.get("data")
-    if isinstance(nested, dict):
-        for key in candidate_keys:
-            value = nested.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-    return ""
-
-
-async def _run_azapi(image_bytes: bytes, correlation_id: str) -> dict[str, Any] | None:
-    if not bool(getattr(config, "AZAPI_ENABLED", True)):
-        logger.info("azapi_skipped_disabled", correlation_id=correlation_id)
-        return None
-    if not getattr(config, "AZAPI_API_KEY", ""):
-        logger.warning("azapi_skipped_no_api_key", correlation_id=correlation_id)
-        return None
-
-    # NOTE: endpoint may change; замени на актуальный из дашборда.
-    endpoint = "https://api.azapi.ai/v1/ocr/passport"
-
-    def _post() -> dict[str, Any]:
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-        payload = {"image_base64": b64}
-
-        headers_variants = [
-            {"X-API-Key": config.AZAPI_API_KEY, "Content-Type": "application/json"},
-            {"Authorization": f"Bearer {config.AZAPI_API_KEY}", "Content-Type": "application/json"},
-        ]
-
-        last_error: Exception | None = None
-        for headers in headers_variants:
-            try:
-                response = requests.post(endpoint, json=payload, headers=headers, timeout=15)
-                response.raise_for_status()
-                return response.json()
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-        if last_error:
-            raise last_error
-        raise RuntimeError("azapi_request_failed")
-
-    try:
-        return await asyncio.to_thread(_post)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("azapi_failed", correlation_id=correlation_id, error=str(exc))
-        return None
 
 
 async def _run_yandex_vision(image_bytes: bytes, correlation_id: str) -> str:
@@ -210,14 +156,11 @@ async def _run_yandex_vision(image_bytes: bytes, correlation_id: str) -> str:
 
 
 async def try_fallback_chain(image_bytes: bytes, correlation_id: str) -> dict[str, Any] | None:
-    fallback_steps = ["ocr_space", "azapi", "yandex_vision"]
+    fallback_steps = ["ocr_space", "yandex_vision"]
     for provider in fallback_steps:
         if provider == "ocr_space":
             raw_data = await _run_ocr_space(image_bytes, correlation_id)
             text = _extract_ocr_space_text(raw_data or {}) if raw_data else ""
-        elif provider == "azapi":
-            raw_data = await _run_azapi(image_bytes, correlation_id)
-            text = _extract_azapi_text(raw_data or {}) if raw_data else ""
         else:
             text = await _run_yandex_vision(image_bytes, correlation_id)
 

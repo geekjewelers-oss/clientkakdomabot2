@@ -10,10 +10,8 @@ from typing import Any
 
 import requests
 
-import config
-from bot.vision_fallback import yandex_vision_extract_text
 from .mrz_parser import MRZParser
-from .paddle_engine import PaddleEngine
+from .settings import settings
 
 try:
     import structlog
@@ -119,7 +117,7 @@ def _extract_ocr_space_text(data: dict[str, Any]) -> str:
 
 
 async def _run_ocr_space(image_bytes: bytes, correlation_id: str) -> dict[str, Any] | None:
-    if not config.OCR_SPACE_API_KEY:
+    if not settings.ocr_space_api_key:
         logger.warning("ocr_space_skipped_no_api_key", correlation_id=correlation_id)
         return None
 
@@ -128,7 +126,7 @@ async def _run_ocr_space(image_bytes: bytes, correlation_id: str) -> dict[str, A
         response = requests.post(
             "https://api.ocr.space/parse/image",
             data={
-                "apikey": config.OCR_SPACE_API_KEY,
+                "apikey": settings.ocr_space_api_key,
                 "language": "rus+eng",
                 "isOverlayRequired": "false",
                 "base64Image": f"data:image/jpeg;base64,{b64}",
@@ -145,11 +143,58 @@ async def _run_ocr_space(image_bytes: bytes, correlation_id: str) -> dict[str, A
         return None
 
 
-
-
 async def _run_yandex_vision(image_bytes: bytes, correlation_id: str) -> str:
+    api_key = settings.yandex_vision_api_key
+    folder_id = settings.yandex_folder_id
+    if not api_key or not folder_id:
+        logger.info("yandex_vision_skipped_no_credentials", correlation_id=correlation_id)
+        return ""
+
+    def _post() -> str:
+        content = base64.b64encode(image_bytes).decode("utf-8")
+        payload = {
+            "folderId": folder_id,
+            "analyze_specs": [
+                {
+                    "content": content,
+                    "features": [
+                        {
+                            "type": "TEXT_DETECTION",
+                            "text_detection_config": {"languageCodes": ["en"]},
+                        }
+                    ],
+                }
+            ],
+        }
+        headers = {
+            "Authorization": f"Api-Key {api_key}",
+            "Content-Type": "application/json",
+        }
+        response = requests.post(
+            "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze",
+            json=payload,
+            headers=headers,
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        words: list[str] = []
+        for analyzed in data.get("results", []):
+            for result in analyzed.get("results", []):
+                text_detection = result.get("textDetection", {})
+                for page in text_detection.get("pages", []):
+                    for block in page.get("blocks", []):
+                        for line in block.get("lines", []):
+                            for word in line.get("words", []):
+                                text = word.get("text")
+                                if text:
+                                    words.append(text)
+
+        return " ".join(words).strip()
+
     try:
-        return await asyncio.to_thread(yandex_vision_extract_text, image_bytes)
+        return await asyncio.to_thread(_post)
     except Exception as exc:  # noqa: BLE001
         logger.warning("yandex_vision_failed", correlation_id=correlation_id, error=str(exc))
         return ""
@@ -171,7 +216,7 @@ async def try_fallback_chain(image_bytes: bytes, correlation_id: str) -> dict[st
         result = _build_result_from_text(
             text=text,
             mrz_text=text,
-            avg_confidence=float(config.MIN_CONFIDENCE),
+            avg_confidence=float(settings.min_confidence),
             source=provider,
             correlation_id=correlation_id,
         )
@@ -211,7 +256,7 @@ def _build_result_from_text(*, text: str, mrz_text: str, avg_confidence: float, 
     cross_ok = _cross_validate(mrz_fields, full_page_fields)
 
     warnings: list[str] = []
-    if avg_confidence < float(config.MIN_CONFIDENCE):
+    if avg_confidence < float(settings.min_confidence):
         warnings.append("low_confidence")
     if not validation.all_three_ok:
         warnings.append("checksum_failed")
@@ -221,7 +266,7 @@ def _build_result_from_text(*, text: str, mrz_text: str, avg_confidence: float, 
     full_name_cyr = full_page_fields.get("full_name_cyr") or ""
     mrz_fields["full_name_cyr"] = full_name_cyr
 
-    accepted = avg_confidence >= float(config.MIN_CONFIDENCE) and validation.all_three_ok and cross_ok
+    accepted = avg_confidence >= float(settings.min_confidence) and validation.all_three_ok and cross_ok
     result.update(
         {
             "success": True,
@@ -239,7 +284,9 @@ async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = N
     corr = correlation_id or str(uuid.uuid4())
     start = time.perf_counter()
 
-    paddle_engine = PaddleEngine(min_confidence=float(config.MIN_CONFIDENCE))
+    from .paddle_engine import PaddleEngine
+
+    paddle_engine = PaddleEngine(min_confidence=float(settings.min_confidence))
     paddle_full = await asyncio.to_thread(paddle_engine.full_page, image_bytes)
     paddle_mrz = await asyncio.to_thread(paddle_engine.mrz_crop, image_bytes)
 
@@ -253,13 +300,13 @@ async def run_ocr_pipeline_v2(image_bytes: bytes, correlation_id: str | None = N
 
     final = paddle_result
 
-    if bool(config.OCR_FALLBACK_ENABLED) and not bool(paddle_result.get("auto_accepted")):
+    if bool(settings.fallback_enabled) and not bool(paddle_result.get("auto_accepted")):
         fallback_result = await try_fallback_chain(image_bytes, corr)
         if fallback_result:
             final = fallback_result
 
     elapsed = time.perf_counter() - start
-    final["sla_breach"] = elapsed > float(getattr(config, "OCR_SLA_TOTAL_TIMEOUT_SECONDS", 8))
+    final["sla_breach"] = elapsed > float(settings.sla_total_timeout)
     final["correlation_id"] = corr
 
     logger.info(

@@ -15,6 +15,12 @@ class OCRSettings:
     local_timeout: int = int(os.getenv("OCR_LOCAL_TIMEOUT", "2"))
     crm_retry_attempts: int = int(os.getenv("OCR_CRM_RETRY_ATTEMPTS", "3"))
     crm_retry_backoff_seconds: float = float(os.getenv("OCR_CRM_RETRY_BACKOFF_SECONDS", "0.1"))
+    ocr_space_api_key: str = os.getenv("OCR_SPACE_API_KEY", "")
+    min_confidence: float = float(os.getenv("MIN_CONFIDENCE", "0.85"))
+    fallback_enabled: bool = os.getenv("OCR_FALLBACK_ENABLED", "true").lower() in {"1", "true", "yes"}
+    sla_total_timeout: float = float(os.getenv("OCR_SLA_TOTAL_TIMEOUT_SECONDS", "8"))
+    yandex_vision_api_key: str = os.getenv("YANDEX_VISION_API_KEY", "")
+    yandex_folder_id: str = os.getenv("YANDEX_FOLDER_ID", "")
 
 
 settings = OCRSettings()

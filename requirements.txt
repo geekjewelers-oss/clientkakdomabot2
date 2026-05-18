@@ -20,4 +20,3 @@ mrz
 fastmrz
 aiohttp
 python-multipart
-pybitrix24

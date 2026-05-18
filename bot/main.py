@@ -19,7 +19,6 @@ from dotenv import load_dotenv
 from redis.asyncio import Redis
 
 from ocr_service.pipeline import run_ocr_pipeline_v2
-from utils.bitrix_integration import BitrixIntegrationError, create_bitrix_contact_and_deal
 
 load_dotenv()
 
@@ -403,16 +402,7 @@ async def on_final_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot)
             await callback.message.answer("Этот документ уже зарегистрирован")
             return
 
-    try:
-        await create_bitrix_contact_and_deal(data)
-    except BitrixIntegrationError as exc:
-        logger.exception("Bitrix integration failed: %s", exc)
-        await callback.message.answer("❌ Ошибка отправки в Bitrix24. Попробуйте позже.")
-        return
-    except Exception as exc:
-        logger.exception("Unexpected Bitrix integration error: %s", exc)
-        await callback.message.answer("❌ Временная ошибка интеграции. Попробуйте позже.")
-        return
+    # TODO: заменить на вызов backend API после реализации backend/intake
 
     for resident in residents:
         resident_hash = resident.get("passport_hash", "")

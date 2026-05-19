@@ -23,7 +23,7 @@ def health() -> dict[str, str]:
 
 app.include_router(auth_router)
 app.include_router(intake_router)
-app.include_router(ocr_router)
+app.include_router(ocr_router, prefix="/ocr", tags=["ocr"])
 app.include_router(dedup_router)
 app.include_router(deals_router)
 app.include_router(apartments_router)

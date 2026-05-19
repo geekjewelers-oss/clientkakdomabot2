@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     OCR_URL: str = "http://localhost:8010"
     OCR_TIMEOUT_SECONDS: int = 30
 
+    OCR_SPACE_API_KEY: str = ""
+    YANDEX_VISION_API_KEY: str = ""
+    YANDEX_FOLDER_ID: str = ""
+    MIN_CONFIDENCE: float = 0.85
+    OCR_FALLBACK_ENABLED: bool = True
+
     JWT_SECRET: str = "change-me"
 
 

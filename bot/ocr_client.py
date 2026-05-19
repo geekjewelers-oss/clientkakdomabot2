@@ -1,3 +1,8 @@
+# LEGACY: Telegram-специфичный OCR клиент.
+# НЕ использовать в новом backend/.
+# Canonical OCR path: backend/ocr/router.py → ocr_service/pipeline.py
+# Этот файл остаётся как reference для Telegram adapter (WAVE 9).
+
 from __future__ import annotations
 
 from dataclasses import dataclass

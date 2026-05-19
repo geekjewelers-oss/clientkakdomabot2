@@ -1,3 +1,7 @@
+# LEGACY: Yandex Vision вызов перенесён в ocr_service/pipeline.py (inline).
+# НЕ использовать в новом backend/.
+# Этот файл остаётся как reference для Telegram adapter (WAVE 9).
+
 import base64
 import logging
 

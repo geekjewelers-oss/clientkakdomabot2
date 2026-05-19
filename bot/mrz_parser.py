@@ -1,3 +1,8 @@
+# LEGACY: Дублирует ocr_service/mrz_parser.py.
+# НЕ использовать в новом backend/.
+# Canonical MRZ parser: ocr_service/mrz_parser.py
+# Этот файл остаётся как reference для Telegram adapter (WAVE 9).
+
 import asyncio
 import hashlib
 import io

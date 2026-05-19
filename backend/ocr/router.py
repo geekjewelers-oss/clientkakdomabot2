@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
+from backend.ocr.metrics import get_metrics_summary
 from backend.ocr.schemas import OCRPassportResult
 from backend.ocr.service import process_passport_ocr
 
@@ -45,3 +48,9 @@ async def ocr_passport(
         mrz_raw=result["mrz_raw"],
         fields=result.get("fields", {}),
     )
+
+
+@router.get("/metrics/summary")
+def ocr_metrics_summary() -> dict[str, Any]:
+    # internal, add auth in WAVE 8
+    return get_metrics_summary()

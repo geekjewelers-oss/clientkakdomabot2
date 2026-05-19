@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import uuid
 
+from backend.ocr.metrics import record_ocr_metric
 from ocr_service.pipeline import run_ocr_pipeline_v2
 
 
 async def process_passport_ocr(image_bytes: bytes, correlation_id: str | None = None) -> dict:
     corr = correlation_id or str(uuid.uuid4())
     result = await run_ocr_pipeline_v2(image_bytes, corr)
+    record_ocr_metric(
+        correlation_id=corr,
+        ocr_result=result,
+        intake_resident_id=None,
+    )
 
     fields = result.get("fields") or {}
 

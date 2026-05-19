@@ -1,3 +1,8 @@
+# LEGACY: Дублирует fallback логику ocr_service/pipeline.py.
+# НЕ использовать в новом backend/.
+# Fallback chain живёт в ocr_service/pipeline.py::try_fallback_chain
+# Этот файл остаётся как reference.
+
 import io
 
 import cv2
